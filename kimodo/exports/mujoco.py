@@ -178,10 +178,11 @@ class MujocoQposConverter:
         for i, joint in enumerate(mujoco_hinge_joints):
             body = parent_map[joint]
             if "quat" in body.attrib:
-                rot = Rotation.from_quat(
-                    [float(x) for x in body.get("quat").strip().split(" ")],
-                    scalar_first=True,
-                )
+                # scipy 1.10.0+ uses scalar_first parameter; older versions expect [x,y,z,w] format by default
+                quat_str = [float(x) for x in body.get("quat").strip().split(" ")]
+                # MuJoCo provides [w,x,y,z], so convert to [x,y,z,w] for older scipy versions
+                quat_xyzw = [quat_str[1], quat_str[2], quat_str[3], quat_str[0]]
+                rot = Rotation.from_quat(quat_xyzw)
                 idx = self._mujoco_indices_to_kimodo_indices[i]
                 self._rot_offsets_q2t[idx] = torch.from_numpy(rot.as_matrix())
                 rot = mujoco_to_kimodo * rot * mujoco_to_kimodo.inv()

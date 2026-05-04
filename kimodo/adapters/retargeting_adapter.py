@@ -1,0 +1,175 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Adapter: Kimodo G1 -> Morph teacher -> target robot."""
+
+from __future__ import annotations
+
+import os
+import pickle
+import subprocess
+import sys
+from typing import Any, Dict, Optional
+
+import torch
+
+from kimodo.adapters.go2_visualizer import GO2Visualizer
+from kimodo.exports.mujoco import MujocoQposConverter
+from kimodo.skeleton import G1Skeleton34, global_rots_to_local_rots
+from kimodo.tools import to_numpy
+
+
+class KimodoRetargetingAdapter:
+    """Convert Kimodo G1 output to PKL and run Morph teacher inference."""
+
+    def __init__(
+        self,
+        retarget_model_dir: str,
+        device: str = "cuda:0",
+        enable_visualization: bool = False,
+        *,
+        output_root: Optional[str] = None,
+        processed_dir: Optional[str] = None,
+        task_family: Optional[str] = None,
+        pair_id: Optional[str] = None,
+        teacher_epoch: Optional[int] = None,
+        reverse: Optional[bool] = None,
+        go2_xml_path: Optional[str] = None,
+    ):
+        self.device = str(device)
+        self.teacher_dir = str(retarget_model_dir)
+        self.enable_visualization = enable_visualization
+        self.visualizer = None
+
+        # Morph pipeline configuration (env-overridable).
+        self.output_root = str(output_root or os.environ.get("MORPH_OUTPUT_ROOT", "./morph"))
+        self.processed_dir = str(
+            processed_dir or os.environ.get("MORPH_PROCESSED_DIR", "./morph/data/processed/loco_g1_go2")
+        )
+        self.task_family = str(task_family or os.environ.get("MORPH_TASK_FAMILY", "locomotion"))
+        self.pair_id = str(pair_id or os.environ.get("MORPH_PAIR_ID", "g1_to_go2"))
+
+        env_epoch = os.environ.get("MORPH_TEACHER_EPOCH")
+        self.teacher_epoch = teacher_epoch
+        if self.teacher_epoch is None and env_epoch not in (None, ""):
+            self.teacher_epoch = int(env_epoch)
+
+        if reverse is None:
+            self.reverse = os.environ.get("MORPH_REVERSE", "0").lower() in ("1", "true", "yes")
+        else:
+            self.reverse = bool(reverse)
+
+        self.go2_xml_path = str(
+            go2_xml_path or os.environ.get("RETARGET_ROBOT_XML", "./morph/assets/robots/unitree_go2/go2.xml")
+        )
+
+        if not os.path.exists(self.teacher_dir):
+            raise FileNotFoundError(f"Teacher run directory not found: {self.teacher_dir}")
+        if not os.path.exists(self.processed_dir):
+            raise FileNotFoundError(f"Processed dir not found: {self.processed_dir}")
+
+        self.converter = MujocoQposConverter(G1Skeleton34())
+        self.skeleton = G1Skeleton34()
+        self.toe_indices = torch.tensor([7, 15, 23, 31, 32])
+
+    def kimodo_to_morph_pkl(
+        self,
+        joints_pos: torch.Tensor,  # [T, 34, 3]
+        joints_rot: torch.Tensor,  # [T, 34, 3, 3]
+        fps: float = 30.0,
+    ) -> Dict[str, Any]:
+        """Convert Kimodo output tensors into Morph G1 PKL format."""
+        joints_pos = torch.as_tensor(joints_pos, dtype=torch.float32)
+        joints_rot = torch.as_tensor(joints_rot, dtype=torch.float32)
+        root_pos = joints_pos[:, 0, :]
+        local_rots_full = global_rots_to_local_rots(joints_rot, self.skeleton)  # [T, 34, 3, 3]
+
+        mask = torch.ones(34, dtype=torch.bool)
+        mask[self.toe_indices] = False
+
+        qpos = self.converter.to_qpos(
+            local_rot_mats=local_rots_full.unsqueeze(0),
+            root_positions=root_pos.unsqueeze(0),
+            root_quat_w_first=False,  # output xyzw
+        ).squeeze(0)
+
+        root_pos_parsed = qpos[:, :3]
+        root_rot_xyzw = qpos[:, 3:7]
+        dof_pos = qpos[:, 7:36]
+
+        return {
+            "fps": float(fps),
+            "dof_pos": to_numpy(dof_pos),
+            "root_pos": to_numpy(root_pos_parsed),
+            "root_rot": to_numpy(root_rot_xyzw),
+            "local_body_pos": None,
+            "link_body_list": None,
+        }
+
+    def _run_morph_inference(self, input_pkl: str, output_pkl: str) -> None:
+        cmd = [
+            sys.executable,
+            "-m",
+            "csmt.pipelines.infer_teacher",
+            "--output-root",
+            self.output_root,
+            "--processed-dir",
+            self.processed_dir,
+            "--task-family",
+            self.task_family,
+            "--pair-id",
+            self.pair_id,
+            "--teacher-dir",
+            self.teacher_dir,
+            "--input-pkl",
+            input_pkl,
+            "--output-pkl",
+            output_pkl,
+            "--device",
+            self.device,
+        ]
+
+        if self.teacher_epoch is not None:
+            cmd.extend(["--teacher-epoch", str(self.teacher_epoch)])
+        if self.reverse:
+            cmd.append("--reverse")
+
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                "Morph infer_teacher failed.\n"
+                f"Command: {' '.join(cmd)}\n"
+                f"STDOUT:\n{proc.stdout}\n"
+                f"STDERR:\n{proc.stderr}"
+            )
+
+    def retarget(
+        self,
+        joints_pos: torch.Tensor,
+        joints_rot: torch.Tensor,
+        fps: float = 30.0,
+        output_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Full pipeline: Kimodo G1 tensors -> Morph retargeted PKL."""
+        if output_path is None:
+            output_path = "./retarget_output/retargeted_go2.pkl"
+        output_path = str(output_path)
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+        g1_pkl = self.kimodo_to_morph_pkl(joints_pos, joints_rot, fps)
+        g1_output_path = output_path.replace(".pkl", "_g1.pkl")
+        with open(g1_output_path, "wb") as f:
+            pickle.dump(g1_pkl, f)
+
+        self._run_morph_inference(g1_output_path, output_path)
+
+        with open(output_path, "rb") as f:
+            out = pickle.load(f)
+
+        if self.enable_visualization:
+            if self.visualizer is None:
+                self.visualizer = GO2Visualizer(go2_xml_path=self.go2_xml_path)
+            if not self.visualizer.is_running():
+                self.visualizer.start()
+            self.visualizer.update_motion(output_path)
+
+        return out

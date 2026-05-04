@@ -146,6 +146,9 @@ outputs
 /batch*.sh
 checkpoints/**/test/*
 nohup.out
+retarget_outputs/
+test_retarget_output/
+
 
 *.swp
 *.swo

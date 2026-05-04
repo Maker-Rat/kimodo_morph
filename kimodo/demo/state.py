@@ -57,3 +57,4 @@ class ClientSession:
     edit_mode_snapshot: Optional[dict[int, dict[str, object]]] = None
     undo_drag_snapshot: Optional[dict[str, object]] = None
     show_only_current_constraint: bool = False  # False = Show All, True = Show only Current
+    retargeting_adapter: Optional[object] = None  # KimodoRetargetingAdapter, cached to avoid recreating

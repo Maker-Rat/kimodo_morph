@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 from collections import defaultdict
 from typing import Optional
 
@@ -190,6 +191,39 @@ def generate(
     joints_pos = pred_joints_output["posed_joints"]  # [B, T, J, 3]
     joints_rot = pred_joints_output["global_rot_mats"]
     foot_contacts = pred_joints_output.get("foot_contacts")
+
+    # Optionally retarget G1 to target robot via Morph teacher.
+    if isinstance(session.skeleton, G1Skeleton34):
+        retarget_model_dir = os.environ.get("MORPH_TEACHER_DIR") or os.environ.get("RETARGET_MODEL_DIR")
+        if retarget_model_dir and os.path.exists(retarget_model_dir):
+            try:
+                from kimodo.adapters import KimodoRetargetingAdapter
+                import time
+                
+                print(f"[Retargeting] Using Morph teacher from {retarget_model_dir}")
+                # Enable visualization if running in interactive mode
+                enable_viz = os.environ.get("SHOW_GO2_VISUALIZATION", "1").lower() in ("1", "true", "yes")
+                
+                # Create adapter once per session and cache it to avoid multiple MuJoCo instances
+                if session.retargeting_adapter is None:
+                    session.retargeting_adapter = KimodoRetargetingAdapter(
+                        retarget_model_dir, device=device, enable_visualization=enable_viz
+                    )
+                adapter = session.retargeting_adapter
+                
+                output_dir = os.environ.get("RETARGET_OUTPUT_DIR", "./retarget_output")
+                os.makedirs(output_dir, exist_ok=True)
+                
+                for sample_idx in range(num_samples):
+                    output_path = os.path.join(output_dir, f"retargeted_go2_{sample_idx:02d}.pkl")
+                    adapter.retarget(
+                        joints_pos[sample_idx],
+                        joints_rot[sample_idx],
+                        fps=30.0,
+                        output_path=output_path
+                    )
+            except Exception as e:
+                print(f"[Retargeting] Error: {e}")
 
     # Optionally project G1 to real robot DoF (1-DoF per joint, clamped) for display.
     if real_robot_rotations and isinstance(session.skeleton, G1Skeleton34):
