@@ -194,24 +194,58 @@ def generate(
 
     # Optionally retarget G1 to target robot via Morph teacher.
     if isinstance(session.skeleton, G1Skeleton34):
-        retarget_model_dir = os.environ.get("MORPH_TEACHER_DIR") or os.environ.get("RETARGET_MODEL_DIR")
-        if retarget_model_dir and os.path.exists(retarget_model_dir):
+        # Prefer per-session UI selection, fall back to env-based configuration.
+        rt_cfg = getattr(session, "retargeting_config", {}) or {}
+        rt_enabled = bool(rt_cfg.get("enabled", False))
+        if not rt_cfg:
+            # Backward-compatible path: no UI config set, use env-only behavior.
+            retarget_model_dir = os.environ.get("MORPH_TEACHER_DIR") or os.environ.get("RETARGET_MODEL_DIR")
+            rt_enabled = bool(retarget_model_dir and os.path.exists(retarget_model_dir))
+            rt_cfg = {
+                "enabled": rt_enabled,
+                "teacher_dir": retarget_model_dir,
+                "output_root": os.environ.get("MORPH_OUTPUT_ROOT"),
+                "processed_dir": os.environ.get("MORPH_PROCESSED_DIR"),
+                "task_family": os.environ.get("MORPH_TASK_FAMILY"),
+                "pair_id": os.environ.get("MORPH_PAIR_ID"),
+                "teacher_epoch": os.environ.get("MORPH_TEACHER_EPOCH"),
+                "reverse": os.environ.get("MORPH_REVERSE", "0").lower() in ("1", "true", "yes"),
+                "go2_xml_path": os.environ.get("RETARGET_ROBOT_XML"),
+            }
+
+        retarget_model_dir = rt_cfg.get("teacher_dir")
+        if rt_enabled and retarget_model_dir and os.path.exists(retarget_model_dir):
             try:
                 from kimodo.adapters import KimodoRetargetingAdapter
-                import time
                 
                 print(f"[Retargeting] Using Morph teacher from {retarget_model_dir}")
                 # Enable visualization if running in interactive mode
                 enable_viz = os.environ.get("SHOW_GO2_VISUALIZATION", "1").lower() in ("1", "true", "yes")
                 
-                # Create adapter once per session and cache it to avoid multiple MuJoCo instances
+                # Create adapter once per session and cache it to avoid multiple MuJoCo instances.
+                # If UI selection changes, ui.py clears this cache.
                 if session.retargeting_adapter is None:
+                    teacher_epoch = rt_cfg.get("teacher_epoch")
+                    if teacher_epoch in ("", None):
+                        teacher_epoch = None
+                    elif not isinstance(teacher_epoch, int):
+                        teacher_epoch = int(teacher_epoch)
+
                     session.retargeting_adapter = KimodoRetargetingAdapter(
-                        retarget_model_dir, device=device, enable_visualization=enable_viz
+                        retarget_model_dir,
+                        device=device,
+                        enable_visualization=enable_viz,
+                        output_root=rt_cfg.get("output_root"),
+                        processed_dir=rt_cfg.get("processed_dir"),
+                        task_family=rt_cfg.get("task_family"),
+                        pair_id=rt_cfg.get("pair_id"),
+                        teacher_epoch=teacher_epoch,
+                        reverse=bool(rt_cfg.get("reverse", False)),
+                        go2_xml_path=rt_cfg.get("go2_xml_path"),
                     )
                 adapter = session.retargeting_adapter
                 
-                output_dir = os.environ.get("RETARGET_OUTPUT_DIR", "./retarget_output")
+                output_dir = str(rt_cfg.get("output_dir") or os.environ.get("RETARGET_OUTPUT_DIR", "./retarget_output"))
                 os.makedirs(output_dir, exist_ok=True)
                 
                 for sample_idx in range(num_samples):

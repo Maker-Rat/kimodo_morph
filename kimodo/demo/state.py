@@ -58,3 +58,5 @@ class ClientSession:
     undo_drag_snapshot: Optional[dict[str, object]] = None
     show_only_current_constraint: bool = False  # False = Show All, True = Show only Current
     retargeting_adapter: Optional[object] = None  # KimodoRetargetingAdapter, cached to avoid recreating
+    retargeting_config: dict = field(default_factory=dict)
+    retargeting_config_key: str = ""

@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # ruff: noqa: I001
+import json
 import math
 import os
 import threading
-from typing import Optional
+from pathlib import Path
+from typing import Any, Optional
 
 from kimodo.constraints import load_constraints_lst, save_constraints_lst
 from kimodo.exports.bvh import motion_to_bvh_bytes, save_motion_bvh
@@ -44,6 +46,52 @@ from .config import (
 )
 from .state import ClientSession
 from kimodo.skeleton import G1Skeleton34, SOMASkeleton30, SOMASkeleton77
+
+
+def _discover_morph_teacher_runs(runs_root: str) -> list[dict[str, Any]]:
+    root = Path(runs_root).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        return []
+
+    discovered: list[dict[str, Any]] = []
+    for run_dir in sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: p.name):
+        meta_path = run_dir / "refactor_teacher_run.json"
+        has_models = (run_dir / "models" / "src").exists() and (run_dir / "models" / "dst").exists()
+        if not has_models and not meta_path.exists():
+            continue
+
+        meta = {}
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text())
+            except Exception:
+                meta = {}
+
+        task_family = str(meta.get("task_family", "") or "")
+        pair_id = str(meta.get("pair_id", "") or "")
+        processed_dir = str(meta.get("processed_dir", "") or "")
+        if not processed_dir:
+            pdirs = meta.get("processed_dirs")
+            if isinstance(pdirs, list) and len(pdirs) > 0:
+                processed_dir = str(pdirs[0])
+
+        display = run_dir.name
+        if task_family and pair_id:
+            display = f"{run_dir.name} | {task_family}/{pair_id}"
+
+        discovered.append(
+            {
+                "key": run_dir.name,
+                "display": display,
+                "teacher_dir": str(run_dir),
+                "task_family": task_family,
+                "pair_id": pair_id,
+                "processed_dir": processed_dir,
+                "output_root": str(root.parent),
+            }
+        )
+
+    return discovered
 
 
 def extract_intervals_and_singles(t: torch.Tensor):
@@ -358,6 +406,82 @@ def create_gui(
                 initial_value=1,
                 visible=not HF_MODE,
             )
+
+            with client.gui.add_folder("Retargeting (Morph)", expand_by_default=False):
+                default_runs_root = os.environ.get("MORPH_RUNS_DIR", "./morph/runs")
+                discovered_runs = _discover_morph_teacher_runs(default_runs_root)
+                run_map = {item["key"]: item for item in discovered_runs}
+                run_options = ["<disabled>", "<env_defaults>"] + [item["key"] for item in discovered_runs]
+
+                default_teacher_env = os.environ.get("MORPH_TEACHER_DIR") or os.environ.get("RETARGET_MODEL_DIR")
+                selected_run = "<env_defaults>"
+                if default_teacher_env:
+                    teacher_name = Path(default_teacher_env).expanduser().resolve().name
+                    if teacher_name in run_map:
+                        selected_run = teacher_name
+
+                gui_retarget_enable = client.gui.add_checkbox(
+                    "Enable",
+                    initial_value=True,
+                    hint="Enable G1 -> robot retargeting after generation.",
+                )
+                gui_retarget_run = client.gui.add_dropdown(
+                    "Teacher Run",
+                    options=run_options,
+                    initial_value=selected_run,
+                    hint="Auto-scanned from MORPH_RUNS_DIR (or ./morph/runs).",
+                )
+                gui_retarget_reverse = client.gui.add_checkbox(
+                    "Reverse",
+                    initial_value=False,
+                    hint="Run reverse retargeting direction (dst->src) using same checkpoint.",
+                )
+                gui_retarget_info = client.gui.add_markdown("")
+                gui_retarget_refresh = client.gui.add_button("Refresh Run List")
+
+                def _set_retarget_info_text() -> None:
+                    cur = gui_retarget_run.value
+                    if cur == "<disabled>":
+                        gui_retarget_info.content = "**Retarget:** disabled"
+                        return
+                    if cur == "<env_defaults>":
+                        gui_retarget_info.content = (
+                            "**Retarget:** using env vars "
+                            "(`MORPH_TEACHER_DIR`, `MORPH_PROCESSED_DIR`, `MORPH_TASK_FAMILY`, `MORPH_PAIR_ID`)"
+                        )
+                        return
+                    item = run_map.get(cur)
+                    if not item:
+                        gui_retarget_info.content = f"**Retarget:** unknown run `{cur}`"
+                        return
+                    gui_retarget_info.content = (
+                        f"**Run:** `{item['key']}`\n\n"
+                        f"- task/pair: `{item.get('task_family') or '?'} / {item.get('pair_id') or '?'}`\n"
+                        f"- processed: `{item.get('processed_dir') or '?'}\n"
+                        f"- teacher: `{item.get('teacher_dir')}`"
+                    )
+
+                _set_retarget_info_text()
+
+                @gui_retarget_run.on_update
+                def _(event: viser.GuiEvent) -> None:
+                    if get_active_session(event.client) is None:
+                        return
+                    _set_retarget_info_text()
+
+                @gui_retarget_refresh.on_click
+                def _(event: viser.GuiEvent) -> None:
+                    if get_active_session(event.client) is None:
+                        return
+                    nonlocal discovered_runs, run_map
+                    discovered_runs = _discover_morph_teacher_runs(default_runs_root)
+                    run_map = {item["key"]: item for item in discovered_runs}
+                    new_options = ["<disabled>", "<env_defaults>"] + [item["key"] for item in discovered_runs]
+                    current = gui_retarget_run.value
+                    gui_retarget_run.options = new_options
+                    if current not in new_options:
+                        gui_retarget_run.value = "<env_defaults>"
+                    _set_retarget_info_text()
 
             gui_use_soma_layer_checkbox = client.gui.add_checkbox(
                 "SOMA layer",
@@ -2856,6 +2980,45 @@ def create_gui(
                 "post_processing": (False if "g1" in session.model_name else gui_postprocess_checkbox.value),
                 "root_margin": gui_root_margin.value,
             }
+
+            selected_retarget_run = gui_retarget_run.value
+            retarget_cfg: dict[str, Any] = {"enabled": False}
+            if gui_retarget_enable.value and selected_retarget_run != "<disabled>":
+                if selected_retarget_run == "<env_defaults>":
+                    retarget_cfg = {
+                        "enabled": True,
+                        "teacher_dir": os.environ.get("MORPH_TEACHER_DIR") or os.environ.get("RETARGET_MODEL_DIR"),
+                        "output_root": os.environ.get("MORPH_OUTPUT_ROOT"),
+                        "processed_dir": os.environ.get("MORPH_PROCESSED_DIR"),
+                        "task_family": os.environ.get("MORPH_TASK_FAMILY"),
+                        "pair_id": os.environ.get("MORPH_PAIR_ID"),
+                        "teacher_epoch": os.environ.get("MORPH_TEACHER_EPOCH"),
+                        "reverse": bool(gui_retarget_reverse.value),
+                        "go2_xml_path": os.environ.get("RETARGET_ROBOT_XML"),
+                        "output_dir": os.environ.get("RETARGET_OUTPUT_DIR", "./retarget_output"),
+                    }
+                else:
+                    selected = run_map.get(selected_retarget_run)
+                    if selected is not None:
+                        retarget_cfg = {
+                            "enabled": True,
+                            "teacher_dir": selected.get("teacher_dir"),
+                            "output_root": selected.get("output_root"),
+                            "processed_dir": selected.get("processed_dir"),
+                            "task_family": selected.get("task_family"),
+                            "pair_id": selected.get("pair_id"),
+                            "teacher_epoch": os.environ.get("MORPH_TEACHER_EPOCH"),
+                            "reverse": bool(gui_retarget_reverse.value),
+                            "go2_xml_path": os.environ.get("RETARGET_ROBOT_XML"),
+                            "output_dir": os.environ.get("RETARGET_OUTPUT_DIR", "./retarget_output"),
+                        }
+
+            cfg_key = json.dumps(retarget_cfg, sort_keys=True)
+            if cfg_key != session.retargeting_config_key:
+                session.retargeting_adapter = None
+            session.retargeting_config = retarget_cfg
+            session.retargeting_config_key = cfg_key
+
             try:
                 demo.generate(
                     event_client,
