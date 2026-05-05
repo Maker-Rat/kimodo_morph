@@ -173,3 +173,13 @@ class KimodoRetargetingAdapter:
             self.visualizer.update_motion(output_path)
 
         return out
+
+    def close(self) -> None:
+        """Shutdown viewer resources owned by this adapter."""
+        if self.visualizer is None:
+            return
+        try:
+            self.visualizer.stop()
+        except Exception:
+            pass
+        self.visualizer = None

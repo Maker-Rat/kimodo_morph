@@ -3015,6 +3015,11 @@ def create_gui(
 
             cfg_key = json.dumps(retarget_cfg, sort_keys=True)
             if cfg_key != session.retargeting_config_key:
+                if session.retargeting_adapter is not None and hasattr(session.retargeting_adapter, "close"):
+                    try:
+                        session.retargeting_adapter.close()
+                    except Exception:
+                        pass
                 session.retargeting_adapter = None
             session.retargeting_config = retarget_cfg
             session.retargeting_config_key = cfg_key

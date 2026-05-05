@@ -272,6 +272,12 @@ class Demo:
     def _cleanup_session_for_client(self, client_id: int) -> None:
         """Remove session and scene state for a client (e.g. on session expiry)."""
         if client_id in self.client_sessions:
+            session = self.client_sessions[client_id]
+            if session.retargeting_adapter is not None and hasattr(session.retargeting_adapter, "close"):
+                try:
+                    session.retargeting_adapter.close()
+                except Exception:
+                    pass
             del self.client_sessions[client_id]
         self.start_direction_markers.pop(client_id, None)
         self.grid_handles.pop(client_id, None)
