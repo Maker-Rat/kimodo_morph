@@ -194,24 +194,9 @@ def generate(
 
     # Optionally retarget G1 to target robot via Morph teacher.
     if isinstance(session.skeleton, G1Skeleton34):
-        # Prefer per-session UI selection, fall back to env-based configuration.
+        # Retarget configuration is fully UI-driven.
         rt_cfg = getattr(session, "retargeting_config", {}) or {}
         rt_enabled = bool(rt_cfg.get("enabled", False))
-        if not rt_cfg:
-            # Backward-compatible path: no UI config set, use env-only behavior.
-            retarget_model_dir = os.environ.get("MORPH_TEACHER_DIR") or os.environ.get("RETARGET_MODEL_DIR")
-            rt_enabled = bool(retarget_model_dir and os.path.exists(retarget_model_dir))
-            rt_cfg = {
-                "enabled": rt_enabled,
-                "teacher_dir": retarget_model_dir,
-                "output_root": os.environ.get("MORPH_OUTPUT_ROOT"),
-                "processed_dir": os.environ.get("MORPH_PROCESSED_DIR"),
-                "task_family": os.environ.get("MORPH_TASK_FAMILY"),
-                "pair_id": os.environ.get("MORPH_PAIR_ID"),
-                "teacher_epoch": os.environ.get("MORPH_TEACHER_EPOCH"),
-                "reverse": os.environ.get("MORPH_REVERSE", "0").lower() in ("1", "true", "yes"),
-                "go2_xml_path": os.environ.get("RETARGET_ROBOT_XML"),
-            }
 
         retarget_model_dir = rt_cfg.get("teacher_dir")
         if rt_enabled and retarget_model_dir and os.path.exists(retarget_model_dir):
@@ -220,7 +205,7 @@ def generate(
                 
                 print(f"[Retargeting] Using Morph teacher from {retarget_model_dir}")
                 # Enable visualization if running in interactive mode
-                enable_viz = os.environ.get("SHOW_GO2_VISUALIZATION", "1").lower() in ("1", "true", "yes")
+                enable_viz = True
                 
                 # Create adapter once per session and cache it to avoid multiple MuJoCo instances.
                 # If UI selection changes, ui.py clears this cache.
@@ -245,11 +230,12 @@ def generate(
                     )
                 adapter = session.retargeting_adapter
                 
-                output_dir = str(rt_cfg.get("output_dir") or os.environ.get("RETARGET_OUTPUT_DIR", "./retarget_output"))
+                output_dir = str(rt_cfg.get("output_dir") or "./retarget_output")
                 os.makedirs(output_dir, exist_ok=True)
                 
                 for sample_idx in range(num_samples):
-                    output_path = os.path.join(output_dir, f"retargeted_go2_{sample_idx:02d}.pkl")
+                    pair_tag = str(rt_cfg.get("pair_id") or "retarget")
+                    output_path = os.path.join(output_dir, f"retargeted_{pair_tag}_{sample_idx:02d}.pkl")
                     adapter.retarget(
                         joints_pos[sample_idx],
                         joints_rot[sample_idx],

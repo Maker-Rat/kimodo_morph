@@ -40,32 +40,27 @@ class KimodoRetargetingAdapter:
         self.enable_visualization = enable_visualization
         self.visualizer = None
 
-        # Morph pipeline configuration (env-overridable).
-        self.output_root = str(output_root or os.environ.get("MORPH_OUTPUT_ROOT", "./morph"))
-        self.processed_dir = str(
-            processed_dir or os.environ.get("MORPH_PROCESSED_DIR", "./morph/data/processed/loco_g1_go2")
-        )
-        self.task_family = str(task_family or os.environ.get("MORPH_TASK_FAMILY", "locomotion"))
-        self.pair_id = str(pair_id or os.environ.get("MORPH_PAIR_ID", "g1_to_go2"))
+        # Morph pipeline configuration (UI-provided).
+        self.output_root = str(output_root or "./morph")
+        self.processed_dir = str(processed_dir or "")
+        self.task_family = str(task_family or "")
+        self.pair_id = str(pair_id or "")
 
-        env_epoch = os.environ.get("MORPH_TEACHER_EPOCH")
         self.teacher_epoch = teacher_epoch
-        if self.teacher_epoch is None and env_epoch not in (None, ""):
-            self.teacher_epoch = int(env_epoch)
+        self.reverse = bool(reverse) if reverse is not None else False
 
-        if reverse is None:
-            self.reverse = os.environ.get("MORPH_REVERSE", "0").lower() in ("1", "true", "yes")
-        else:
-            self.reverse = bool(reverse)
-
-        self.go2_xml_path = str(
-            go2_xml_path or os.environ.get("RETARGET_ROBOT_XML", "./morph/assets/robots/unitree_go2/go2.xml")
-        )
+        self.go2_xml_path = str(go2_xml_path or "./morph/assets/robots/unitree_go2/go2.xml")
 
         if not os.path.exists(self.teacher_dir):
             raise FileNotFoundError(f"Teacher run directory not found: {self.teacher_dir}")
+        if not self.processed_dir:
+            raise ValueError("Processed dir is empty. Select a Processed Data option in the Kimodo UI.")
         if not os.path.exists(self.processed_dir):
             raise FileNotFoundError(f"Processed dir not found: {self.processed_dir}")
+        if not self.task_family:
+            raise ValueError("Task family is empty. Select a task in the Kimodo UI.")
+        if not self.pair_id:
+            raise ValueError("Pair id is empty. Select a pair in the Kimodo UI.")
 
         self.converter = MujocoQposConverter(G1Skeleton34())
         self.skeleton = G1Skeleton34()
