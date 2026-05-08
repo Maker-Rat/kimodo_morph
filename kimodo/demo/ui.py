@@ -48,6 +48,63 @@ from .state import ClientSession
 from kimodo.skeleton import G1Skeleton34, SOMASkeleton30, SOMASkeleton77
 
 
+def _read_yaml_top_level(path: Path) -> dict[str, Any]:
+    """Best-effort YAML loader for small top-level fields used by Kimodo UI."""
+    try:
+        import yaml  # type: ignore
+
+        data = yaml.safe_load(path.read_text()) or {}
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+
+    parsed: dict[str, Any] = {}
+    for line in path.read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        # Keep only top-level keys.
+        if line.startswith((" ", "	")):
+            continue
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if value.startswith(("'", '"')) and value.endswith(("'", '"')) and len(value) >= 2:
+            value = value[1:-1]
+        parsed[key] = value
+    return parsed
+
+
+def _discover_morph_pairs(configs_root: str) -> list[dict[str, Any]]:
+    root = Path(configs_root).expanduser().resolve() / "tasks"
+    if not root.exists() or not root.is_dir():
+        return []
+
+    discovered: list[dict[str, Any]] = []
+    for pair_yaml in sorted(root.glob('*/pairs/*.yaml')):
+        family = pair_yaml.parents[1].name
+        data = _read_yaml_top_level(pair_yaml)
+
+        pair_id = str(data.get('pair_id') or pair_yaml.stem)
+        src_robot = str(data.get('src_robot') or '')
+        dst_robot = str(data.get('dst_robot') or '')
+
+        discovered.append(
+            {
+                'task_family': family,
+                'pair_id': pair_id,
+                'src_robot': src_robot,
+                'dst_robot': dst_robot,
+                'path': str(pair_yaml),
+            }
+        )
+    return discovered
+
+
 def _discover_morph_teacher_runs(runs_root: str) -> list[dict[str, Any]]:
     root = Path(runs_root).expanduser().resolve()
     if not root.exists() or not root.is_dir():
@@ -55,8 +112,8 @@ def _discover_morph_teacher_runs(runs_root: str) -> list[dict[str, Any]]:
 
     discovered: list[dict[str, Any]] = []
     for run_dir in sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: p.name):
-        meta_path = run_dir / "refactor_teacher_run.json"
-        has_models = (run_dir / "models" / "src").exists() and (run_dir / "models" / "dst").exists()
+        meta_path = run_dir / 'refactor_teacher_run.json'
+        has_models = (run_dir / 'models' / 'src').exists() and (run_dir / 'models' / 'dst').exists()
         if not has_models and not meta_path.exists():
             continue
 
@@ -67,13 +124,24 @@ def _discover_morph_teacher_runs(runs_root: str) -> list[dict[str, Any]]:
             except Exception:
                 meta = {}
 
-        task_family = str(meta.get("task_family", "") or "")
-        pair_id = str(meta.get("pair_id", "") or "")
-        processed_dir = str(meta.get("processed_dir", "") or "")
+        task_family = str(meta.get('task_family', '') or '')
+        pair_id = str(meta.get('pair_id', '') or '')
+        processed_dir = str(meta.get('processed_dir', '') or '')
         if not processed_dir:
-            pdirs = meta.get("processed_dirs")
+            pdirs = meta.get('processed_dirs')
             if isinstance(pdirs, list) and len(pdirs) > 0:
                 processed_dir = str(pdirs[0])
+
+        src_robot = str(meta.get('src_robot_id') or meta.get('src_robot') or '')
+        dst_robot = str(meta.get('dst_robot_id') or meta.get('dst_robot') or '')
+
+        src_models_dir = run_dir / 'models' / 'src'
+        epochs: list[int] = []
+        if src_models_dir.exists() and src_models_dir.is_dir():
+            for candidate in src_models_dir.iterdir():
+                if candidate.is_dir() and candidate.name.isdigit():
+                    epochs.append(int(candidate.name))
+        epochs = sorted(set(epochs))
 
         display = run_dir.name
         if task_family and pair_id:
@@ -81,17 +149,21 @@ def _discover_morph_teacher_runs(runs_root: str) -> list[dict[str, Any]]:
 
         discovered.append(
             {
-                "key": run_dir.name,
-                "display": display,
-                "teacher_dir": str(run_dir),
-                "task_family": task_family,
-                "pair_id": pair_id,
-                "processed_dir": processed_dir,
-                "output_root": str(root.parent),
+                'key': run_dir.name,
+                'display': display,
+                'teacher_dir': str(run_dir),
+                'task_family': task_family,
+                'pair_id': pair_id,
+                'src_robot': src_robot,
+                'dst_robot': dst_robot,
+                'processed_dir': processed_dir,
+                'output_root': str(root.parent),
+                'epochs': epochs,
             }
         )
 
     return discovered
+
 
 
 def extract_intervals_and_singles(t: torch.Tensor):
@@ -408,22 +480,133 @@ def create_gui(
             )
 
             with client.gui.add_folder("Retargeting (Morph)", expand_by_default=False):
-                default_runs_root = os.environ.get("MORPH_RUNS_DIR", "./morph/runs")
+                default_output_root = os.environ.get("MORPH_OUTPUT_ROOT", "./morph")
+                default_runs_root = os.environ.get("MORPH_RUNS_DIR", str(Path(default_output_root) / "runs"))
+                default_configs_root = str(Path(default_output_root) / "configs")
+
+                discovered_pairs = _discover_morph_pairs(default_configs_root)
+                pair_map = {(item["task_family"], item["pair_id"]): item for item in discovered_pairs}
+
                 discovered_runs = _discover_morph_teacher_runs(default_runs_root)
                 run_map = {item["key"]: item for item in discovered_runs}
-                run_options = ["<disabled>", "<env_defaults>"] + [item["key"] for item in discovered_runs]
 
-                default_teacher_env = os.environ.get("MORPH_TEACHER_DIR") or os.environ.get("RETARGET_MODEL_DIR")
+                family_options = sorted(
+                    set(
+                        [item["task_family"] for item in discovered_pairs if item.get("task_family")]
+                        + [item["task_family"] for item in discovered_runs if item.get("task_family")]
+                    )
+                )
+                if not family_options:
+                    family_options = ["locomotion"]
+
+                default_family = os.environ.get("MORPH_TASK_FAMILY", family_options[0])
+                if default_family not in family_options:
+                    default_family = family_options[0]
+
+                def _pair_options_for_family(task_family: str) -> list[str]:
+                    return sorted(
+                        {
+                            item["pair_id"]
+                            for item in discovered_pairs
+                            if item.get("task_family") == task_family and item.get("pair_id")
+                        }
+                        | {
+                            item["pair_id"]
+                            for item in discovered_runs
+                            if item.get("task_family") == task_family and item.get("pair_id")
+                        }
+                    )
+
+                pair_options = _pair_options_for_family(default_family)
+                if not pair_options:
+                    pair_options = ["g1_to_go2"]
+
+                default_pair = os.environ.get("MORPH_PAIR_ID", pair_options[0])
+                if default_pair not in pair_options:
+                    default_pair = pair_options[0]
+
+                default_reverse = os.environ.get("MORPH_REVERSE", "0").lower() in ("1", "true", "yes")
+                default_direction = "reverse" if default_reverse else "forward"
+
+                def _dst_options_for_pair(task_family: str, pair_id: str) -> list[str]:
+                    out: list[str] = []
+                    pair_info = pair_map.get((task_family, pair_id))
+                    if pair_info:
+                        src = str(pair_info.get("src_robot") or "")
+                        dst = str(pair_info.get("dst_robot") or "")
+                        if dst:
+                            out.append(f"forward ({src} -> {dst})")
+                        if src:
+                            out.append(f"reverse ({dst} -> {src})")
+                    if not out:
+                        out = ["forward", "reverse"]
+                    return out
+
+                direction_options = _dst_options_for_pair(default_family, default_pair)
+                if default_direction.startswith("reverse"):
+                    default_direction = next((x for x in direction_options if x.startswith("reverse")), direction_options[0])
+                else:
+                    default_direction = next((x for x in direction_options if x.startswith("forward")), direction_options[0])
+
+                def _runs_for_selection(task_family: str, pair_id: str) -> list[dict[str, Any]]:
+                    out = [
+                        item
+                        for item in discovered_runs
+                        if item.get("task_family") == task_family and item.get("pair_id") == pair_id
+                    ]
+                    if out:
+                        return out
+                    return discovered_runs
+
+                initial_run_candidates = _runs_for_selection(default_family, default_pair)
+                run_options = ["<disabled>", "<env_defaults>"] + [item["key"] for item in initial_run_candidates]
+
                 selected_run = "<env_defaults>"
+                default_teacher_env = os.environ.get("MORPH_TEACHER_DIR") or os.environ.get("RETARGET_MODEL_DIR")
                 if default_teacher_env:
                     teacher_name = Path(default_teacher_env).expanduser().resolve().name
                     if teacher_name in run_map:
                         selected_run = teacher_name
+                elif len(initial_run_candidates) > 0:
+                    selected_run = initial_run_candidates[-1]["key"]
+
+                def _epoch_options_for_run(run_key: str) -> list[str]:
+                    if run_key in ("<disabled>", "<env_defaults>"):
+                        return ["<latest>"]
+                    run = run_map.get(run_key)
+                    if not run:
+                        return ["<latest>"]
+                    eps = run.get("epochs", []) or []
+                    if not eps:
+                        return ["<latest>"]
+                    return ["<latest>"] + [str(ep) for ep in eps]
+
+                initial_epoch_options = _epoch_options_for_run(selected_run)
+                env_epoch = os.environ.get("MORPH_TEACHER_EPOCH")
+                selected_epoch = env_epoch if env_epoch in initial_epoch_options else "<latest>"
 
                 gui_retarget_enable = client.gui.add_checkbox(
                     "Enable",
                     initial_value=True,
-                    hint="Enable G1 -> robot retargeting after generation.",
+                    hint="Enable retargeting after generation.",
+                )
+                gui_retarget_task_family = client.gui.add_dropdown(
+                    "Task Family",
+                    options=family_options,
+                    initial_value=default_family,
+                    hint="Morph task family.",
+                )
+                gui_retarget_pair = client.gui.add_dropdown(
+                    "Pair ID",
+                    options=pair_options,
+                    initial_value=default_pair,
+                    hint="Morph pair id.",
+                )
+                gui_retarget_direction = client.gui.add_dropdown(
+                    "Direction",
+                    options=direction_options,
+                    initial_value=default_direction,
+                    hint="forward = src->dst, reverse = dst->src",
                 )
                 gui_retarget_run = client.gui.add_dropdown(
                     "Teacher Run",
@@ -431,39 +614,126 @@ def create_gui(
                     initial_value=selected_run,
                     hint="Auto-scanned from MORPH_RUNS_DIR (or ./morph/runs).",
                 )
-                gui_retarget_reverse = client.gui.add_checkbox(
-                    "Reverse",
-                    initial_value=False,
-                    hint="Run reverse retargeting direction (dst->src) using same checkpoint.",
+                gui_retarget_epoch = client.gui.add_dropdown(
+                    "Teacher Epoch",
+                    options=initial_epoch_options,
+                    initial_value=selected_epoch,
+                    hint="<latest> uses latest available epoch.",
                 )
                 gui_retarget_info = client.gui.add_markdown("")
-                gui_retarget_refresh = client.gui.add_button("Refresh Run List")
+                gui_retarget_refresh = client.gui.add_button("Refresh Morph Config/Run List")
 
                 def _set_retarget_info_text() -> None:
-                    cur = gui_retarget_run.value
-                    if cur == "<disabled>":
+                    cur_run = gui_retarget_run.value
+                    task_family = gui_retarget_task_family.value
+                    pair_id = gui_retarget_pair.value
+                    direction_label = gui_retarget_direction.value
+
+                    if cur_run == "<disabled>":
                         gui_retarget_info.content = "**Retarget:** disabled"
                         return
-                    if cur == "<env_defaults>":
+                    if cur_run == "<env_defaults>":
                         gui_retarget_info.content = (
-                            "**Retarget:** using env vars "
-                            "(`MORPH_TEACHER_DIR`, `MORPH_PROCESSED_DIR`, `MORPH_TASK_FAMILY`, `MORPH_PAIR_ID`)"
+                            f"**Retarget (env):** `{task_family}/{pair_id}` | `{direction_label}`\n\n"
+                            "Uses env vars (`MORPH_TEACHER_DIR`, `MORPH_PROCESSED_DIR`, `MORPH_TASK_FAMILY`, `MORPH_PAIR_ID`)"
                         )
                         return
-                    item = run_map.get(cur)
-                    if not item:
-                        gui_retarget_info.content = f"**Retarget:** unknown run `{cur}`"
+
+                    run = run_map.get(cur_run)
+                    if not run:
+                        gui_retarget_info.content = f"**Retarget:** unknown run `{cur_run}`"
                         return
+
+                    pair_info = pair_map.get((task_family, pair_id))
+                    src_dst = "? -> ?"
+                    if pair_info:
+                        src = str(pair_info.get("src_robot") or "?")
+                        dst = str(pair_info.get("dst_robot") or "?")
+                        if direction_label.startswith("reverse"):
+                            src_dst = f"{dst} -> {src}"
+                        else:
+                            src_dst = f"{src} -> {dst}"
+
                     gui_retarget_info.content = (
-                        f"**Run:** `{item['key']}`\n\n"
-                        f"- task/pair: `{item.get('task_family') or '?'} / {item.get('pair_id') or '?'}`\n"
-                        f"- processed: `{item.get('processed_dir') or '?'}\n"
-                        f"- teacher: `{item.get('teacher_dir')}`"
+                        f"**Run:** `{run['key']}`\n\n"
+                        f"- selected task/pair: `{task_family} / {pair_id}`\n"
+                        f"- selected direction: `{src_dst}`\n"
+                        f"- run task/pair: `{run.get('task_family') or '?'} / {run.get('pair_id') or '?'}`\n"
+                        f"- processed: `{run.get('processed_dir') or '?'}`\n"
+                        f"- teacher: `{run.get('teacher_dir')}`"
                     )
+
+                def _refresh_pair_controls() -> None:
+                    task_family = gui_retarget_task_family.value
+                    new_pairs = _pair_options_for_family(task_family)
+                    if not new_pairs:
+                        new_pairs = ["g1_to_go2"]
+                    current_pair = gui_retarget_pair.value
+                    gui_retarget_pair.options = new_pairs
+                    if current_pair not in new_pairs:
+                        gui_retarget_pair.value = new_pairs[0]
+
+                    new_directions = _dst_options_for_pair(task_family, gui_retarget_pair.value)
+                    current_direction = gui_retarget_direction.value
+                    gui_retarget_direction.options = new_directions
+                    if current_direction not in new_directions:
+                        gui_retarget_direction.value = new_directions[0]
+
+                def _refresh_run_controls() -> None:
+                    task_family = gui_retarget_task_family.value
+                    pair_id = gui_retarget_pair.value
+                    filtered_runs = _runs_for_selection(task_family, pair_id)
+                    new_run_options = ["<disabled>", "<env_defaults>"] + [item["key"] for item in filtered_runs]
+                    current_run = gui_retarget_run.value
+                    gui_retarget_run.options = new_run_options
+                    if current_run not in new_run_options:
+                        current_run = "<env_defaults>"
+                        if len(filtered_runs) > 0:
+                            current_run = filtered_runs[-1]["key"]
+                        gui_retarget_run.value = current_run
+
+                    new_epoch_options = _epoch_options_for_run(gui_retarget_run.value)
+                    current_epoch = gui_retarget_epoch.value
+                    gui_retarget_epoch.options = new_epoch_options
+                    if current_epoch not in new_epoch_options:
+                        gui_retarget_epoch.value = "<latest>"
 
                 _set_retarget_info_text()
 
+                @gui_retarget_task_family.on_update
+                def _(event: viser.GuiEvent) -> None:
+                    if get_active_session(event.client) is None:
+                        return
+                    _refresh_pair_controls()
+                    _refresh_run_controls()
+                    _set_retarget_info_text()
+
+                @gui_retarget_pair.on_update
+                def _(event: viser.GuiEvent) -> None:
+                    if get_active_session(event.client) is None:
+                        return
+                    _refresh_pair_controls()
+                    _refresh_run_controls()
+                    _set_retarget_info_text()
+
+                @gui_retarget_direction.on_update
+                def _(event: viser.GuiEvent) -> None:
+                    if get_active_session(event.client) is None:
+                        return
+                    _set_retarget_info_text()
+
                 @gui_retarget_run.on_update
+                def _(event: viser.GuiEvent) -> None:
+                    if get_active_session(event.client) is None:
+                        return
+                    new_epoch_options = _epoch_options_for_run(gui_retarget_run.value)
+                    current_epoch = gui_retarget_epoch.value
+                    gui_retarget_epoch.options = new_epoch_options
+                    if current_epoch not in new_epoch_options:
+                        gui_retarget_epoch.value = "<latest>"
+                    _set_retarget_info_text()
+
+                @gui_retarget_epoch.on_update
                 def _(event: viser.GuiEvent) -> None:
                     if get_active_session(event.client) is None:
                         return
@@ -473,14 +743,29 @@ def create_gui(
                 def _(event: viser.GuiEvent) -> None:
                     if get_active_session(event.client) is None:
                         return
-                    nonlocal discovered_runs, run_map
+                    nonlocal discovered_pairs, pair_map, discovered_runs, run_map
+
+                    discovered_pairs = _discover_morph_pairs(default_configs_root)
+                    pair_map = {(item["task_family"], item["pair_id"]): item for item in discovered_pairs}
+
                     discovered_runs = _discover_morph_teacher_runs(default_runs_root)
                     run_map = {item["key"]: item for item in discovered_runs}
-                    new_options = ["<disabled>", "<env_defaults>"] + [item["key"] for item in discovered_runs]
-                    current = gui_retarget_run.value
-                    gui_retarget_run.options = new_options
-                    if current not in new_options:
-                        gui_retarget_run.value = "<env_defaults>"
+
+                    new_families = sorted(
+                        set(
+                            [item["task_family"] for item in discovered_pairs if item.get("task_family")]
+                            + [item["task_family"] for item in discovered_runs if item.get("task_family")]
+                        )
+                    )
+                    if not new_families:
+                        new_families = ["locomotion"]
+                    current_family = gui_retarget_task_family.value
+                    gui_retarget_task_family.options = new_families
+                    if current_family not in new_families:
+                        gui_retarget_task_family.value = new_families[0]
+
+                    _refresh_pair_controls()
+                    _refresh_run_controls()
                     _set_retarget_info_text()
 
             gui_use_soma_layer_checkbox = client.gui.add_checkbox(
@@ -2982,33 +3267,47 @@ def create_gui(
             }
 
             selected_retarget_run = gui_retarget_run.value
+            selected_task_family = gui_retarget_task_family.value
+            selected_pair_id = gui_retarget_pair.value
+            selected_direction = gui_retarget_direction.value
+            selected_epoch = gui_retarget_epoch.value
+            reverse_selected = str(selected_direction).startswith("reverse")
+
             retarget_cfg: dict[str, Any] = {"enabled": False}
             if gui_retarget_enable.value and selected_retarget_run != "<disabled>":
                 if selected_retarget_run == "<env_defaults>":
+                    teacher_epoch_env = os.environ.get("MORPH_TEACHER_EPOCH")
                     retarget_cfg = {
                         "enabled": True,
                         "teacher_dir": os.environ.get("MORPH_TEACHER_DIR") or os.environ.get("RETARGET_MODEL_DIR"),
                         "output_root": os.environ.get("MORPH_OUTPUT_ROOT"),
                         "processed_dir": os.environ.get("MORPH_PROCESSED_DIR"),
-                        "task_family": os.environ.get("MORPH_TASK_FAMILY"),
-                        "pair_id": os.environ.get("MORPH_PAIR_ID"),
-                        "teacher_epoch": os.environ.get("MORPH_TEACHER_EPOCH"),
-                        "reverse": bool(gui_retarget_reverse.value),
+                        "task_family": selected_task_family or os.environ.get("MORPH_TASK_FAMILY"),
+                        "pair_id": selected_pair_id or os.environ.get("MORPH_PAIR_ID"),
+                        "teacher_epoch": teacher_epoch_env,
+                        "reverse": bool(reverse_selected),
                         "go2_xml_path": os.environ.get("RETARGET_ROBOT_XML"),
                         "output_dir": os.environ.get("RETARGET_OUTPUT_DIR", "./retarget_output"),
                     }
                 else:
                     selected = run_map.get(selected_retarget_run)
                     if selected is not None:
+                        teacher_epoch_value: Any = None
+                        if selected_epoch != "<latest>":
+                            try:
+                                teacher_epoch_value = int(selected_epoch)
+                            except Exception:
+                                teacher_epoch_value = selected_epoch
+
                         retarget_cfg = {
                             "enabled": True,
                             "teacher_dir": selected.get("teacher_dir"),
-                            "output_root": selected.get("output_root"),
-                            "processed_dir": selected.get("processed_dir"),
-                            "task_family": selected.get("task_family"),
-                            "pair_id": selected.get("pair_id"),
-                            "teacher_epoch": os.environ.get("MORPH_TEACHER_EPOCH"),
-                            "reverse": bool(gui_retarget_reverse.value),
+                            "output_root": selected.get("output_root") or os.environ.get("MORPH_OUTPUT_ROOT"),
+                            "processed_dir": selected.get("processed_dir") or os.environ.get("MORPH_PROCESSED_DIR"),
+                            "task_family": selected_task_family or selected.get("task_family"),
+                            "pair_id": selected_pair_id or selected.get("pair_id"),
+                            "teacher_epoch": teacher_epoch_value,
+                            "reverse": bool(reverse_selected),
                             "go2_xml_path": os.environ.get("RETARGET_ROBOT_XML"),
                             "output_dir": os.environ.get("RETARGET_OUTPUT_DIR", "./retarget_output"),
                         }
