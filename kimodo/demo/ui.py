@@ -110,6 +110,7 @@ def _discover_morph_teacher_runs(runs_root: str) -> list[dict[str, Any]]:
     if not root.exists() or not root.is_dir():
         return []
 
+    project_root = root.parent
     discovered: list[dict[str, Any]] = []
     for run_dir in sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: p.name):
         meta_path = run_dir / 'refactor_teacher_run.json'
@@ -145,7 +146,7 @@ def _discover_morph_teacher_runs(runs_root: str) -> list[dict[str, Any]]:
             if raw_path.is_absolute():
                 cands.append(raw_path)
             else:
-                cands.append((root.parent / raw_path))
+                cands.append((project_root / raw_path))
                 cands.append((run_dir / raw_path))
 
             chosen = None
@@ -168,6 +169,21 @@ def _discover_morph_teacher_runs(runs_root: str) -> list[dict[str, Any]]:
                 pdirs = meta.get('processed_dirs')
                 if isinstance(pdirs, list) and len(pdirs) > 0:
                     processed_dir = str(pdirs[0])
+
+        if processed_dir:
+            pd = Path(processed_dir)
+            if not pd.is_absolute():
+                cand1 = (project_root / pd).resolve(strict=False)
+                cand2 = (run_dir / pd).resolve(strict=False)
+                if cand1.exists():
+                    processed_dir = str(cand1)
+                elif cand2.exists():
+                    processed_dir = str(cand2)
+                else:
+                    processed_dir = str(cand1)
+
+        if (not processed_dir or not Path(processed_dir).exists()) and task_family and pair_id:
+            processed_dir = _discover_processed_dir_for_pair(str(project_root), task_family, pair_id) or processed_dir
 
         src_robot = str(meta.get('src_robot_id') or meta.get('src_robot') or '')
         dst_robot = str(meta.get('dst_robot_id') or meta.get('dst_robot') or '')
@@ -194,7 +210,7 @@ def _discover_morph_teacher_runs(runs_root: str) -> list[dict[str, Any]]:
                 'src_robot': src_robot,
                 'dst_robot': dst_robot,
                 'processed_dir': processed_dir,
-                'output_root': str(root.parent),
+                'output_root': str(project_root),
                 'epochs': epochs,
             }
         )
@@ -207,6 +223,18 @@ def _discover_processed_dataset_dirs(output_root: str) -> list[str]:
     if not processed_root.exists() or not processed_root.is_dir():
         return []
     return sorted(str(p.resolve()) for p in processed_root.iterdir() if p.is_dir())
+
+
+def _discover_processed_dir_for_pair(output_root: str, task_family: str, pair_id: str) -> str:
+    processed_root = Path(output_root).expanduser().resolve() / 'data' / 'processed'
+    if not processed_root.exists() or not processed_root.is_dir():
+        return ""
+    meta_name = f"{task_family}_{pair_id}_dataset_meta.json"
+    matches = list(processed_root.glob(f"*/{meta_name}"))
+    if not matches:
+        return ""
+    matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return str(matches[0].parent.resolve(strict=False))
 
 
 def _discover_robot_xml_map(configs_root: str, output_root: str) -> dict[str, str]:
@@ -553,7 +581,8 @@ def create_gui(
             )
 
             with client.gui.add_folder("Retargeting (Morph)", expand_by_default=False):
-                default_output_root = "./morph"
+                repo_root = Path(__file__).resolve().parents[2]
+                default_output_root = str((repo_root / "morph").resolve(strict=False))
                 default_runs_root = str(Path(default_output_root) / "runs")
                 default_configs_root = str(Path(default_output_root) / "configs")
 
@@ -716,7 +745,16 @@ def create_gui(
                     if selected_processed_dir == "<from_teacher>":
                         run = run_map.get(cur_run)
                         if run is not None:
-                            return str(run.get("processed_dir") or "")
+                            from_run = str(run.get("processed_dir") or "")
+                            if from_run:
+                                return from_run
+                        fallback = _discover_processed_dir_for_pair(
+                            default_output_root,
+                            gui_retarget_task_family.value,
+                            gui_retarget_pair.value,
+                        )
+                        if fallback:
+                            return fallback
                         return ""
                     return str(selected_processed_dir)
 
@@ -3384,18 +3422,35 @@ def create_gui(
             def _resolve_processed_for_cfg(selected_run: dict[str, Any] | None) -> str | None:
                 if selected_processed == "<from_teacher>":
                     if selected_run is not None:
-                        return selected_run.get("processed_dir")
-                    return None
+                        from_run = str(selected_run.get("processed_dir") or "")
+                        if from_run:
+                            return from_run
+                    fallback = _discover_processed_dir_for_pair(
+                        default_output_root,
+                        selected_task_family,
+                        selected_pair_id,
+                    )
+                    return fallback or None
                 return selected_processed
 
             def _resolve_xml_for_cfg() -> str | None:
                 pair_info = pair_map.get((selected_task_family, selected_pair_id))
-                if not pair_info:
-                    return None
-                src_robot = str(pair_info.get("src_robot") or "")
-                dst_robot = str(pair_info.get("dst_robot") or "")
+                src_robot = ""
+                dst_robot = ""
+                if pair_info:
+                    src_robot = str(pair_info.get("src_robot") or "")
+                    dst_robot = str(pair_info.get("dst_robot") or "")
+                elif selected_retarget_run != "<disabled>":
+                    run = run_map.get(selected_retarget_run)
+                    if run is not None:
+                        src_robot = str(run.get("src_robot") or "")
+                        dst_robot = str(run.get("dst_robot") or "")
+                if (not src_robot or not dst_robot) and "_to_" in selected_pair_id:
+                    pair_src, pair_dst = selected_pair_id.split("_to_", 1)
+                    src_robot = src_robot or pair_src
+                    dst_robot = dst_robot or pair_dst
                 viz_robot = src_robot if reverse_selected else dst_robot
-                return robot_xml_map.get(viz_robot)
+                return robot_xml_map.get(viz_robot) if viz_robot else None
 
             retarget_cfg: dict[str, Any] = {"enabled": False}
             if gui_retarget_enable.value and selected_retarget_run != "<disabled>":

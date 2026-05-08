@@ -41,7 +41,7 @@ class KimodoRetargetingAdapter:
         self.visualizer = None
 
         # Morph pipeline configuration (UI-provided).
-        self.output_root = str(output_root or "./morph")
+        self.output_root = os.path.abspath(str(output_root or "./morph"))
         self.processed_dir = str(processed_dir or "")
         self.task_family = str(task_family or "")
         self.pair_id = str(pair_id or "")
@@ -49,7 +49,11 @@ class KimodoRetargetingAdapter:
         self.teacher_epoch = teacher_epoch
         self.reverse = bool(reverse) if reverse is not None else False
 
-        self.go2_xml_path = str(go2_xml_path or "./morph/assets/robots/unitree_go2/go2.xml")
+        if self.processed_dir and not os.path.isabs(self.processed_dir):
+            self.processed_dir = os.path.abspath(os.path.join(self.output_root, self.processed_dir))
+
+        default_xml = os.path.join(self.output_root, "assets", "robots", "unitree_go2", "go2.xml")
+        self.go2_xml_path = str(go2_xml_path or default_xml)
 
         if not os.path.exists(self.teacher_dir):
             raise FileNotFoundError(f"Teacher run directory not found: {self.teacher_dir}")
