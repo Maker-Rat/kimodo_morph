@@ -585,6 +585,29 @@ def create_gui(
                 env_epoch = os.environ.get("MORPH_TEACHER_EPOCH")
                 selected_epoch = env_epoch if env_epoch in initial_epoch_options else "<latest>"
 
+
+                def _unique_keep_order(items: list[str]) -> list[str]:
+                    out: list[str] = []
+                    seen = set()
+                    for x in items:
+                        if x and x not in seen:
+                            out.append(x)
+                            seen.add(x)
+                    return out
+
+                def _processed_dir_options(task_family: str, pair_id: str) -> list[str]:
+                    filtered_runs = _runs_for_selection(task_family, pair_id)
+                    pdirs = _unique_keep_order(
+                        [str(item.get("processed_dir") or "") for item in filtered_runs]
+                        + [str(item.get("processed_dir") or "") for item in discovered_runs]
+                    )
+                    return ["<auto_from_run>", "<env_default>"] + pdirs
+
+                initial_processed_options = _processed_dir_options(default_family, default_pair)
+                selected_processed = "<auto_from_run>"
+                if os.environ.get("MORPH_PROCESSED_DIR"):
+                    selected_processed = "<env_default>"
+
                 gui_retarget_enable = client.gui.add_checkbox(
                     "Enable",
                     initial_value=True,
@@ -620,8 +643,25 @@ def create_gui(
                     initial_value=selected_epoch,
                     hint="<latest> uses latest available epoch.",
                 )
+                gui_retarget_processed = client.gui.add_dropdown(
+                    "Processed Data",
+                    options=initial_processed_options,
+                    initial_value=selected_processed,
+                    hint="Choose processed dataset root: auto (from run), env default, or explicit path.",
+                )
                 gui_retarget_info = client.gui.add_markdown("")
                 gui_retarget_refresh = client.gui.add_button("Refresh Morph Config/Run List")
+
+                def _resolve_processed_dir(cur_run: str) -> str:
+                    selected_processed_dir = gui_retarget_processed.value
+                    if selected_processed_dir == "<env_default>":
+                        return str(os.environ.get("MORPH_PROCESSED_DIR") or "")
+                    if selected_processed_dir == "<auto_from_run>":
+                        run = run_map.get(cur_run)
+                        if run is not None:
+                            return str(run.get("processed_dir") or os.environ.get("MORPH_PROCESSED_DIR") or "")
+                        return str(os.environ.get("MORPH_PROCESSED_DIR") or "")
+                    return str(selected_processed_dir)
 
                 def _set_retarget_info_text() -> None:
                     cur_run = gui_retarget_run.value
@@ -633,8 +673,10 @@ def create_gui(
                         gui_retarget_info.content = "**Retarget:** disabled"
                         return
                     if cur_run == "<env_defaults>":
+                        resolved_processed = _resolve_processed_dir(cur_run) or "?"
                         gui_retarget_info.content = (
                             f"**Retarget (env):** `{task_family}/{pair_id}` | `{direction_label}`\n\n"
+                            f"- processed: `{resolved_processed}`\n"
                             "Uses env vars (`MORPH_TEACHER_DIR`, `MORPH_PROCESSED_DIR`, `MORPH_TASK_FAMILY`, `MORPH_PAIR_ID`)"
                         )
                         return
@@ -654,12 +696,14 @@ def create_gui(
                         else:
                             src_dst = f"{src} -> {dst}"
 
+                    selected_processed_dir = _resolve_processed_dir(cur_run) or "?"
                     gui_retarget_info.content = (
                         f"**Run:** `{run['key']}`\n\n"
                         f"- selected task/pair: `{task_family} / {pair_id}`\n"
                         f"- selected direction: `{src_dst}`\n"
                         f"- run task/pair: `{run.get('task_family') or '?'} / {run.get('pair_id') or '?'}`\n"
-                        f"- processed: `{run.get('processed_dir') or '?'}`\n"
+                        f"- run processed: `{run.get('processed_dir') or '?'}`\n"
+                        f"- selected processed: `{selected_processed_dir}`\n"
                         f"- teacher: `{run.get('teacher_dir')}`"
                     )
 
@@ -698,6 +742,12 @@ def create_gui(
                     if current_epoch not in new_epoch_options:
                         gui_retarget_epoch.value = "<latest>"
 
+                    new_processed_options = _processed_dir_options(task_family, pair_id)
+                    current_processed = gui_retarget_processed.value
+                    gui_retarget_processed.options = new_processed_options
+                    if current_processed not in new_processed_options:
+                        gui_retarget_processed.value = "<auto_from_run>"
+
                 _set_retarget_info_text()
 
                 @gui_retarget_task_family.on_update
@@ -734,6 +784,12 @@ def create_gui(
                     _set_retarget_info_text()
 
                 @gui_retarget_epoch.on_update
+                def _(event: viser.GuiEvent) -> None:
+                    if get_active_session(event.client) is None:
+                        return
+                    _set_retarget_info_text()
+
+                @gui_retarget_processed.on_update
                 def _(event: viser.GuiEvent) -> None:
                     if get_active_session(event.client) is None:
                         return
@@ -3271,7 +3327,19 @@ def create_gui(
             selected_pair_id = gui_retarget_pair.value
             selected_direction = gui_retarget_direction.value
             selected_epoch = gui_retarget_epoch.value
+            selected_processed = gui_retarget_processed.value
             reverse_selected = str(selected_direction).startswith("reverse")
+
+            def _resolve_processed_for_cfg(selected_run_key: str, selected_run: dict[str, Any] | None = None) -> str | None:
+                if selected_processed == "<env_default>":
+                    return os.environ.get("MORPH_PROCESSED_DIR")
+                if selected_processed == "<auto_from_run>":
+                    if selected_run_key == "<env_defaults>":
+                        return os.environ.get("MORPH_PROCESSED_DIR")
+                    if selected_run is not None:
+                        return selected_run.get("processed_dir") or os.environ.get("MORPH_PROCESSED_DIR")
+                    return os.environ.get("MORPH_PROCESSED_DIR")
+                return selected_processed
 
             retarget_cfg: dict[str, Any] = {"enabled": False}
             if gui_retarget_enable.value and selected_retarget_run != "<disabled>":
@@ -3281,7 +3349,7 @@ def create_gui(
                         "enabled": True,
                         "teacher_dir": os.environ.get("MORPH_TEACHER_DIR") or os.environ.get("RETARGET_MODEL_DIR"),
                         "output_root": os.environ.get("MORPH_OUTPUT_ROOT"),
-                        "processed_dir": os.environ.get("MORPH_PROCESSED_DIR"),
+                        "processed_dir": _resolve_processed_for_cfg("<env_defaults>"),
                         "task_family": selected_task_family or os.environ.get("MORPH_TASK_FAMILY"),
                         "pair_id": selected_pair_id or os.environ.get("MORPH_PAIR_ID"),
                         "teacher_epoch": teacher_epoch_env,
@@ -3303,7 +3371,7 @@ def create_gui(
                             "enabled": True,
                             "teacher_dir": selected.get("teacher_dir"),
                             "output_root": selected.get("output_root") or os.environ.get("MORPH_OUTPUT_ROOT"),
-                            "processed_dir": selected.get("processed_dir") or os.environ.get("MORPH_PROCESSED_DIR"),
+                            "processed_dir": _resolve_processed_for_cfg(selected_retarget_run, selected),
                             "task_family": selected_task_family or selected.get("task_family"),
                             "pair_id": selected_pair_id or selected.get("pair_id"),
                             "teacher_epoch": teacher_epoch_value,
