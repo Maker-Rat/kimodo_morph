@@ -132,6 +132,42 @@ def _discover_morph_teacher_runs(runs_root: str) -> list[dict[str, Any]]:
             if isinstance(pdirs, list) and len(pdirs) > 0:
                 processed_dir = str(pdirs[0])
 
+        if not processed_dir:
+            ref_keys = [
+                'srcstats_path', 'dststats_path',
+                'src_train_path', 'dst_train_path',
+                'src_test_path', 'dst_test_path',
+                'humstats_path', 'dogstats_path',
+                'hum_train_path', 'dog_train_path',
+                'hum_test_path', 'dog_test_path',
+            ]
+            for key in ref_keys:
+                raw = meta.get(key)
+                if not raw:
+                    continue
+                raw_str = str(raw)
+                cands = []
+                raw_path = Path(raw_str)
+                if raw_path.is_absolute():
+                    cands.append(raw_path)
+                else:
+                    cands.append((root.parent / raw_path))
+                    cands.append((run_dir / raw_path))
+
+                chosen = None
+                for cand in cands:
+                    if cand.exists():
+                        chosen = cand
+                        break
+                if chosen is None:
+                    chosen = cands[0]
+
+                if chosen.suffix.lower() in ('.npz', '.npy', '.pkl', '.pt', '.pth', '.json'):
+                    processed_dir = str(chosen.parent.resolve(strict=False))
+                else:
+                    processed_dir = str(chosen.resolve(strict=False))
+                break
+
         src_robot = str(meta.get('src_robot_id') or meta.get('src_robot') or '')
         dst_robot = str(meta.get('dst_robot_id') or meta.get('dst_robot') or '')
 
@@ -163,6 +199,15 @@ def _discover_morph_teacher_runs(runs_root: str) -> list[dict[str, Any]]:
         )
 
     return discovered
+
+
+def _discover_processed_dataset_dirs(output_root: str) -> list[str]:
+    processed_root = Path(output_root).expanduser().resolve() / 'data' / 'processed'
+    if not processed_root.exists() or not processed_root.is_dir():
+        return []
+    return sorted(str(p.resolve()) for p in processed_root.iterdir() if p.is_dir())
+
+
 
 
 
@@ -595,18 +640,14 @@ def create_gui(
                             seen.add(x)
                     return out
 
+                discovered_processed_dirs = _discover_processed_dataset_dirs(default_output_root)
+
                 def _processed_dir_options(task_family: str, pair_id: str) -> list[str]:
-                    filtered_runs = _runs_for_selection(task_family, pair_id)
-                    pdirs = _unique_keep_order(
-                        [str(item.get("processed_dir") or "") for item in filtered_runs]
-                        + [str(item.get("processed_dir") or "") for item in discovered_runs]
-                    )
-                    return ["<auto_from_run>", "<env_default>"] + pdirs
+                    _ = (task_family, pair_id)
+                    return ["<from_teacher>"] + list(discovered_processed_dirs)
 
                 initial_processed_options = _processed_dir_options(default_family, default_pair)
-                selected_processed = "<auto_from_run>"
-                if os.environ.get("MORPH_PROCESSED_DIR"):
-                    selected_processed = "<env_default>"
+                selected_processed = "<from_teacher>"
 
                 gui_retarget_enable = client.gui.add_checkbox(
                     "Enable",
@@ -647,19 +688,17 @@ def create_gui(
                     "Processed Data",
                     options=initial_processed_options,
                     initial_value=selected_processed,
-                    hint="Choose processed dataset root: auto (from run), env default, or explicit path.",
+                    hint="Use teacher-inferred processed dir (from srcstats/etc) or pick a directory under morph/data/processed.",
                 )
                 gui_retarget_info = client.gui.add_markdown("")
                 gui_retarget_refresh = client.gui.add_button("Refresh Morph Config/Run List")
 
                 def _resolve_processed_dir(cur_run: str) -> str:
                     selected_processed_dir = gui_retarget_processed.value
-                    if selected_processed_dir == "<env_default>":
-                        return str(os.environ.get("MORPH_PROCESSED_DIR") or "")
-                    if selected_processed_dir == "<auto_from_run>":
+                    if selected_processed_dir == "<from_teacher>":
                         run = run_map.get(cur_run)
                         if run is not None:
-                            return str(run.get("processed_dir") or os.environ.get("MORPH_PROCESSED_DIR") or "")
+                            return str(run.get("processed_dir") or "")
                         return str(os.environ.get("MORPH_PROCESSED_DIR") or "")
                     return str(selected_processed_dir)
 
@@ -746,7 +785,7 @@ def create_gui(
                     current_processed = gui_retarget_processed.value
                     gui_retarget_processed.options = new_processed_options
                     if current_processed not in new_processed_options:
-                        gui_retarget_processed.value = "<auto_from_run>"
+                        gui_retarget_processed.value = "<from_teacher>"
 
                 _set_retarget_info_text()
 
@@ -799,13 +838,14 @@ def create_gui(
                 def _(event: viser.GuiEvent) -> None:
                     if get_active_session(event.client) is None:
                         return
-                    nonlocal discovered_pairs, pair_map, discovered_runs, run_map
+                    nonlocal discovered_pairs, pair_map, discovered_runs, run_map, discovered_processed_dirs
 
                     discovered_pairs = _discover_morph_pairs(default_configs_root)
                     pair_map = {(item["task_family"], item["pair_id"]): item for item in discovered_pairs}
 
                     discovered_runs = _discover_morph_teacher_runs(default_runs_root)
                     run_map = {item["key"]: item for item in discovered_runs}
+                    discovered_processed_dirs = _discover_processed_dataset_dirs(default_output_root)
 
                     new_families = sorted(
                         set(
@@ -3331,9 +3371,7 @@ def create_gui(
             reverse_selected = str(selected_direction).startswith("reverse")
 
             def _resolve_processed_for_cfg(selected_run_key: str, selected_run: dict[str, Any] | None = None) -> str | None:
-                if selected_processed == "<env_default>":
-                    return os.environ.get("MORPH_PROCESSED_DIR")
-                if selected_processed == "<auto_from_run>":
+                if selected_processed == "<from_teacher>":
                     if selected_run_key == "<env_defaults>":
                         return os.environ.get("MORPH_PROCESSED_DIR")
                     if selected_run is not None:
