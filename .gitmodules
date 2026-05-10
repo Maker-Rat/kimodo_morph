@@ -1,3 +1,4 @@
 [submodule "morph"]
 	path = morph
 	url = https://github.com/Maker-Rat/morph
+	branch = dev
