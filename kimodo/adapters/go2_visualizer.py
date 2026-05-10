@@ -37,6 +37,7 @@ class GO2Visualizer:
         self.base_pos = None
         self.base_rot = None
         self.actuated_joints = []
+        self.motion_joints = []
         
         self.frame = 0
         self.paused = False
@@ -53,7 +54,7 @@ class GO2Visualizer:
         # Disable gravity for kinematic playback
         self.model.opt.gravity[:] = 0
         
-        # Find actuated joints
+        # Keep actuator info for debugging only.
         self.actuated_joints = []
         for i in range(self.model.nu):
             trnid = self.model.actuator_trnid[i]
@@ -64,6 +65,23 @@ class GO2Visualizer:
                 qpos_addr = self.model.jnt_qposadr[joint_id]
                 joint_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, joint_id)
                 self.actuated_joints.append((joint_id, qpos_addr, joint_name))
+
+        # Motion should be mapped by joint order (non-free joints), not actuator order.
+        self.motion_joints = []
+        for joint_id in range(self.model.njnt):
+            jtype = self.model.jnt_type[joint_id]
+            # Skip free/ball joints and only keep single-dof joints.
+            if jtype in (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE):
+                qpos_addr = self.model.jnt_qposadr[joint_id]
+                joint_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, joint_id)
+                self.motion_joints.append((joint_id, qpos_addr, joint_name))
+        print(
+            f"[Visualizer] XML={self.go2_xml_path} "
+            f"motion_joints={len(self.motion_joints)} actuators={len(self.actuated_joints)}"
+        )
+        if self.motion_joints:
+            preview = [name for _, _, name in self.motion_joints[:10]]
+            print(f"[Visualizer] motion joint order preview: {preview}")
     
     def load_motion_from_pkl(self, pkl_path: str):
         """Load motion from pickle file"""
@@ -101,8 +119,8 @@ class GO2Visualizer:
         # Set base rotation (wxyz format)
         self.data.qpos[3:7] = self.base_rot[frame_idx]
         
-        # Set joint angles
-        for i, (jnt_id, qpos_addr, name) in enumerate(self.actuated_joints):
+        # Set joint angles by joint order (matches Morph dof_pos semantics).
+        for i, (jnt_id, qpos_addr, name) in enumerate(self.motion_joints):
             if i < self.joint_angles.shape[1]:
                 self.data.qpos[qpos_addr] = self.joint_angles[frame_idx, i]
         

@@ -5,6 +5,7 @@
 import json
 import math
 import os
+import shlex
 import threading
 from pathlib import Path
 from typing import Any, Optional
@@ -124,6 +125,9 @@ def _discover_morph_teacher_runs(runs_root: str) -> list[dict[str, Any]]:
                 meta = json.loads(meta_path.read_text())
             except Exception:
                 meta = {}
+        legacy_args = meta.get("legacy_args", {})
+        if not isinstance(legacy_args, dict):
+            legacy_args = {}
 
         task_family = str(meta.get('task_family', '') or '')
         pair_id = str(meta.get('pair_id', '') or '')
@@ -139,12 +143,21 @@ def _discover_morph_teacher_runs(runs_root: str) -> list[dict[str, Any]]:
         for key in ref_keys:
             raw = meta.get(key)
             if not raw:
+                raw = legacy_args.get(key)
+            if not raw:
                 continue
             raw_str = str(raw)
             cands = []
             raw_path = Path(raw_str)
             if raw_path.is_absolute():
                 cands.append(raw_path)
+                # Cross-machine fallback: keep path under current morph root if original absolute root changed.
+                raw_posix = raw_path.as_posix()
+                marker = "/data/"
+                idx = raw_posix.find(marker)
+                if idx != -1:
+                    suffix = raw_posix[idx + 1 :]  # "data/..."
+                    cands.append((project_root / suffix))
             else:
                 cands.append((project_root / raw_path))
                 cands.append((run_dir / raw_path))
@@ -166,9 +179,32 @@ def _discover_morph_teacher_runs(runs_root: str) -> list[dict[str, Any]]:
         if not processed_dir:
             processed_dir = str(meta.get('processed_dir', '') or '')
             if not processed_dir:
+                processed_dir = str(legacy_args.get('processed_dir', '') or legacy_args.get('processed-dir', '') or '')
+            if not processed_dir:
                 pdirs = meta.get('processed_dirs')
                 if isinstance(pdirs, list) and len(pdirs) > 0:
                     processed_dir = str(pdirs[0])
+            if not processed_dir:
+                roots = meta.get('dataset_roots')
+                if isinstance(roots, list) and len(roots) > 0:
+                    processed_dir = str(roots[0] or "")
+            if not processed_dir:
+                roots = legacy_args.get('dataset_roots')
+                if isinstance(roots, list) and len(roots) > 0:
+                    processed_dir = str(roots[0] or "")
+
+        if not processed_dir:
+            para_path = run_dir / "para.txt"
+            if para_path.exists():
+                try:
+                    toks = shlex.split(para_path.read_text().strip())
+                except Exception:
+                    toks = para_path.read_text().strip().split()
+                for i, tok in enumerate(toks):
+                    if tok in ("--processed-dir", "--processed_dir", "--data-dir", "--data_dir"):
+                        if i + 1 < len(toks):
+                            processed_dir = str(toks[i + 1]).strip()
+                            break
 
         if processed_dir:
             pd = Path(processed_dir)
@@ -747,14 +783,36 @@ def create_gui(
                         if run is not None:
                             from_run = str(run.get("processed_dir") or "")
                             if from_run:
+                                print(f"[Retargeting][from_teacher] using run processed_dir: {from_run}")
                                 return from_run
+                            run_task_family = str(run.get("task_family") or gui_retarget_task_family.value)
+                            run_pair_id = str(run.get("pair_id") or gui_retarget_pair.value)
+                            fallback_from_run = _discover_processed_dir_for_pair(
+                                default_output_root,
+                                run_task_family,
+                                run_pair_id,
+                            )
+                            if fallback_from_run:
+                                print(
+                                    f"[Retargeting][from_teacher] fallback by run pair "
+                                    f"{run_task_family}/{run_pair_id}: {fallback_from_run}"
+                                )
+                                return fallback_from_run
                         fallback = _discover_processed_dir_for_pair(
                             default_output_root,
                             gui_retarget_task_family.value,
                             gui_retarget_pair.value,
                         )
                         if fallback:
+                            print(
+                                f"[Retargeting][from_teacher] fallback by UI pair "
+                                f"{gui_retarget_task_family.value}/{gui_retarget_pair.value}: {fallback}"
+                            )
                             return fallback
+                        print(
+                            f"[Retargeting][from_teacher] EMPTY "
+                            f"(run={cur_run}, ui_pair={gui_retarget_task_family.value}/{gui_retarget_pair.value})"
+                        )
                         return ""
                     return str(selected_processed_dir)
 
@@ -3424,12 +3482,36 @@ def create_gui(
                     if selected_run is not None:
                         from_run = str(selected_run.get("processed_dir") or "")
                         if from_run:
+                            print(f"[Retargeting][cfg] using run processed_dir: {from_run}")
                             return from_run
+                        run_task_family = str(selected_run.get("task_family") or selected_task_family)
+                        run_pair_id = str(selected_run.get("pair_id") or selected_pair_id)
+                        fallback_from_run = _discover_processed_dir_for_pair(
+                            default_output_root,
+                            run_task_family,
+                            run_pair_id,
+                        )
+                        if fallback_from_run:
+                            print(
+                                f"[Retargeting][cfg] fallback by run pair "
+                                f"{run_task_family}/{run_pair_id}: {fallback_from_run}"
+                            )
+                            return fallback_from_run
                     fallback = _discover_processed_dir_for_pair(
                         default_output_root,
                         selected_task_family,
                         selected_pair_id,
                     )
+                    if fallback:
+                        print(
+                            f"[Retargeting][cfg] fallback by UI pair "
+                            f"{selected_task_family}/{selected_pair_id}: {fallback}"
+                        )
+                    else:
+                        print(
+                            f"[Retargeting][cfg] EMPTY "
+                            f"(ui_pair={selected_task_family}/{selected_pair_id})"
+                        )
                     return fallback or None
                 return selected_processed
 

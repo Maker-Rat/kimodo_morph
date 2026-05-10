@@ -4,10 +4,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pickle
+import shlex
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
@@ -49,11 +52,23 @@ class KimodoRetargetingAdapter:
         self.teacher_epoch = teacher_epoch
         self.reverse = bool(reverse) if reverse is not None else False
 
+        if not self.processed_dir:
+            self.processed_dir = self._infer_processed_dir_from_teacher()
+
         if self.processed_dir and not os.path.isabs(self.processed_dir):
             self.processed_dir = os.path.abspath(os.path.join(self.output_root, self.processed_dir))
 
         default_xml = os.path.join(self.output_root, "assets", "robots", "unitree_go2", "go2.xml")
         self.go2_xml_path = str(go2_xml_path or default_xml)
+
+        print(
+            "[Retargeting][adapter-init] "
+            f"teacher_dir={self.teacher_dir} "
+            f"processed_dir={self.processed_dir or '<EMPTY>'} "
+            f"task_family={self.task_family or '<EMPTY>'} "
+            f"pair_id={self.pair_id or '<EMPTY>'} "
+            f"xml={self.go2_xml_path}"
+        )
 
         if not os.path.exists(self.teacher_dir):
             raise FileNotFoundError(f"Teacher run directory not found: {self.teacher_dir}")
@@ -69,6 +84,91 @@ class KimodoRetargetingAdapter:
         self.converter = MujocoQposConverter(G1Skeleton34())
         self.skeleton = G1Skeleton34()
         self.toe_indices = torch.tensor([7, 15, 23, 31, 32])
+
+    def _resolve_candidate_path(self, raw: str) -> str:
+        p = Path(str(raw).strip())
+        if p.is_absolute():
+            # If absolute path is stale (different machine root), try remapping under current output_root.
+            if p.exists():
+                return str(p)
+            p_posix = p.as_posix()
+            marker = "/data/"
+            idx = p_posix.find(marker)
+            if idx != -1:
+                suffix = p_posix[idx + 1 :]  # "data/..."
+                remapped = (Path(self.output_root) / suffix).resolve(strict=False)
+                return str(remapped)
+            return str(p)
+        cands = [
+            (Path(self.output_root) / p),
+            (Path(self.teacher_dir) / p),
+            (Path(self.teacher_dir).parent / p),
+            (Path.cwd() / p),
+        ]
+        for c in cands:
+            if c.exists():
+                return str(c.resolve(strict=False))
+        return str(cands[0].resolve(strict=False))
+
+    def _infer_processed_dir_from_teacher(self) -> str:
+        run_dir = Path(self.teacher_dir)
+        meta_path = run_dir / "refactor_teacher_run.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text())
+            except Exception:
+                meta = {}
+            legacy_args = meta.get("legacy_args", {})
+            if not isinstance(legacy_args, dict):
+                legacy_args = {}
+            for key in ("processed_dir", "processed_dirs", "dataset_roots"):
+                val = meta.get(key)
+                if not val:
+                    val = legacy_args.get(key) or legacy_args.get(key.replace("_", "-"))
+                if isinstance(val, str) and val.strip():
+                    resolved = self._resolve_candidate_path(val.strip())
+                    if Path(resolved).exists():
+                        return resolved
+                if isinstance(val, list):
+                    for item in val:
+                        if isinstance(item, str) and item.strip():
+                            resolved = self._resolve_candidate_path(item.strip())
+                            if Path(resolved).exists():
+                                return resolved
+            for key in (
+                "srcstats_path", "dststats_path",
+                "src_train_path", "dst_train_path",
+                "src_test_path", "dst_test_path",
+                "humstats_path", "dogstats_path",
+                "hum_train_path", "dog_train_path",
+                "hum_test_path", "dog_test_path",
+            ):
+                raw = meta.get(key)
+                if not raw:
+                    raw = legacy_args.get(key)
+                if not raw:
+                    continue
+                resolved = self._resolve_candidate_path(str(raw))
+                p = Path(resolved)
+                if p.suffix.lower() in (".npz", ".npy", ".pkl", ".pt", ".pth", ".json"):
+                    return str(p.parent.resolve(strict=False))
+                return str(p.resolve(strict=False))
+
+        para_path = run_dir / "para.txt"
+        if para_path.exists():
+            txt = para_path.read_text().strip()
+            try:
+                toks = shlex.split(txt)
+            except Exception:
+                toks = txt.split()
+            for i, tok in enumerate(toks):
+                if tok in ("--processed-dir", "--processed_dir", "--data-dir", "--data_dir"):
+                    if i + 1 < len(toks):
+                        resolved = self._resolve_candidate_path(toks[i + 1])
+                        if Path(resolved).exists():
+                            return resolved
+
+        return ""
 
     def kimodo_to_morph_pkl(
         self,
