@@ -776,6 +776,24 @@ def create_gui(
                 gui_retarget_info = client.gui.add_markdown("")
                 gui_retarget_refresh = client.gui.add_button("Refresh Morph Config/Run List")
 
+                def _normalize_processed_path(path_str: str) -> str:
+                    raw = str(path_str or "").strip()
+                    if not raw:
+                        return ""
+                    p = Path(raw)
+                    if p.is_absolute():
+                        if p.exists():
+                            return str(p.resolve(strict=False))
+                        raw_posix = p.as_posix()
+                        marker = "/data/"
+                        idx = raw_posix.find(marker)
+                        if idx != -1:
+                            suffix = raw_posix[idx + 1 :]  # "data/..."
+                            remapped = (Path(default_output_root) / suffix).resolve(strict=False)
+                            return str(remapped)
+                        return raw
+                    return str((Path(default_output_root) / p).resolve(strict=False))
+
                 def _resolve_processed_dir(cur_run: str) -> str:
                     selected_processed_dir = gui_retarget_processed.value
                     if selected_processed_dir == "<from_teacher>":
@@ -783,8 +801,12 @@ def create_gui(
                         if run is not None:
                             from_run = str(run.get("processed_dir") or "")
                             if from_run:
-                                print(f"[Retargeting][from_teacher] using run processed_dir: {from_run}")
-                                return from_run
+                                normalized = _normalize_processed_path(from_run)
+                                print(
+                                    "[Retargeting][from_teacher] using run processed_dir: "
+                                    f"{from_run} -> {normalized}"
+                                )
+                                return normalized
                             run_task_family = str(run.get("task_family") or gui_retarget_task_family.value)
                             run_pair_id = str(run.get("pair_id") or gui_retarget_pair.value)
                             fallback_from_run = _discover_processed_dir_for_pair(
@@ -797,7 +819,7 @@ def create_gui(
                                     f"[Retargeting][from_teacher] fallback by run pair "
                                     f"{run_task_family}/{run_pair_id}: {fallback_from_run}"
                                 )
-                                return fallback_from_run
+                                return _normalize_processed_path(fallback_from_run)
                         fallback = _discover_processed_dir_for_pair(
                             default_output_root,
                             gui_retarget_task_family.value,
@@ -808,7 +830,7 @@ def create_gui(
                                 f"[Retargeting][from_teacher] fallback by UI pair "
                                 f"{gui_retarget_task_family.value}/{gui_retarget_pair.value}: {fallback}"
                             )
-                            return fallback
+                            return _normalize_processed_path(fallback)
                         print(
                             f"[Retargeting][from_teacher] EMPTY "
                             f"(run={cur_run}, ui_pair={gui_retarget_task_family.value}/{gui_retarget_pair.value})"
@@ -3482,8 +3504,9 @@ def create_gui(
                     if selected_run is not None:
                         from_run = str(selected_run.get("processed_dir") or "")
                         if from_run:
-                            print(f"[Retargeting][cfg] using run processed_dir: {from_run}")
-                            return from_run
+                            normalized = _normalize_processed_path(from_run)
+                            print(f"[Retargeting][cfg] using run processed_dir: {from_run} -> {normalized}")
+                            return normalized
                         run_task_family = str(selected_run.get("task_family") or selected_task_family)
                         run_pair_id = str(selected_run.get("pair_id") or selected_pair_id)
                         fallback_from_run = _discover_processed_dir_for_pair(
@@ -3496,7 +3519,7 @@ def create_gui(
                                 f"[Retargeting][cfg] fallback by run pair "
                                 f"{run_task_family}/{run_pair_id}: {fallback_from_run}"
                             )
-                            return fallback_from_run
+                            return _normalize_processed_path(fallback_from_run)
                     fallback = _discover_processed_dir_for_pair(
                         default_output_root,
                         selected_task_family,
@@ -3507,13 +3530,14 @@ def create_gui(
                             f"[Retargeting][cfg] fallback by UI pair "
                             f"{selected_task_family}/{selected_pair_id}: {fallback}"
                         )
+                        return _normalize_processed_path(fallback)
                     else:
                         print(
                             f"[Retargeting][cfg] EMPTY "
                             f"(ui_pair={selected_task_family}/{selected_pair_id})"
                         )
-                    return fallback or None
-                return selected_processed
+                    return None
+                return _normalize_processed_path(selected_processed)
 
             def _resolve_xml_for_cfg() -> str | None:
                 pair_info = pair_map.get((selected_task_family, selected_pair_id))

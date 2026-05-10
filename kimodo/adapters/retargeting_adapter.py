@@ -55,8 +55,12 @@ class KimodoRetargetingAdapter:
         if not self.processed_dir:
             self.processed_dir = self._infer_processed_dir_from_teacher()
 
-        if self.processed_dir and not os.path.isabs(self.processed_dir):
-            self.processed_dir = os.path.abspath(os.path.join(self.output_root, self.processed_dir))
+        if self.processed_dir:
+            if os.path.isabs(self.processed_dir):
+                if not os.path.exists(self.processed_dir):
+                    self.processed_dir = self._resolve_candidate_path(self.processed_dir)
+            else:
+                self.processed_dir = os.path.abspath(os.path.join(self.output_root, self.processed_dir))
 
         default_xml = os.path.join(self.output_root, "assets", "robots", "unitree_go2", "go2.xml")
         self.go2_xml_path = str(go2_xml_path or default_xml)
