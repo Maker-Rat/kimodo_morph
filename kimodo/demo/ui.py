@@ -786,6 +786,8 @@ def create_gui(
                 )
                 gui_retarget_dst_start_height = client.gui.add_number(
                     "Dst Start Height",
+                    min=0.0,
+                    step=0.01,
                     initial_value=0.0,
                     hint="Optional output base start height. Set <= 0 to let Morph use its default.",
                 )
