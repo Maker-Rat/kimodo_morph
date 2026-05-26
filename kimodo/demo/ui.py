@@ -773,8 +773,54 @@ def create_gui(
                     initial_value=selected_processed,
                     hint="Use teacher-inferred processed dir (from srcstats/etc) or pick a directory under morph/data/processed.",
                 )
+                gui_retarget_corrector = client.gui.add_text(
+                    "Corrector Checkpoint",
+                    initial_value="",
+                    hint="Optional Morph corrector checkpoint, e.g. /path/to/corrector/best.pt.",
+                )
+                gui_retarget_root_rotation_mode = client.gui.add_dropdown(
+                    "Root Rotation Mode",
+                    options=["yaw", "rpy"],
+                    initial_value="yaw",
+                    hint="Passed to Morph infer_teacher. Use rpy for teachers/datasets trained with body angular velocity features.",
+                )
+                gui_retarget_dst_start_height = client.gui.add_number(
+                    "Dst Start Height",
+                    initial_value=0.0,
+                    hint="Optional output base start height. Set <= 0 to let Morph use its default.",
+                )
+                gui_retarget_root_skate_comp = client.gui.add_checkbox(
+                    "Root Skate Comp",
+                    initial_value=False,
+                    hint="Apply Morph stance-based root skate compensation after teacher/corrector.",
+                )
+                gui_retarget_publish_zmq = client.gui.add_text(
+                    "Publish ZMQ",
+                    initial_value="",
+                    hint="Optional endpoint, e.g. tcp://127.0.0.1:5555. Publishes retargeted references after generation.",
+                )
+                gui_retarget_publish_offsets = client.gui.add_text(
+                    "Publish Offsets",
+                    initial_value="0,1",
+                    hint="Comma-separated reference offsets for sim2sim, usually 0,1.",
+                )
+                gui_retarget_publish_quat = client.gui.add_dropdown(
+                    "Publish Quat",
+                    options=["wxyz", "xyzw"],
+                    initial_value="wxyz",
+                    hint="Quaternion convention expected by the sim2sim receiver.",
+                )
                 gui_retarget_info = client.gui.add_markdown("")
                 gui_retarget_refresh = client.gui.add_button("Refresh Morph Config/Run List")
+
+                def _parse_publish_offsets(raw: str) -> list[int]:
+                    out: list[int] = []
+                    for item in str(raw or "").split(","):
+                        item = item.strip()
+                        if not item:
+                            continue
+                        out.append(int(item))
+                    return out or [0, 1]
 
                 def _normalize_processed_path(path_str: str) -> str:
                     raw = str(path_str or "").strip()
@@ -871,6 +917,9 @@ def create_gui(
                         f"- run task/pair: `{run.get('task_family') or '?'} / {run.get('pair_id') or '?'}`\n"
                         f"- run processed: `{run.get('processed_dir') or '?'}`\n"
                         f"- selected processed: `{selected_processed_dir}`\n"
+                        f"- corrector: `{gui_retarget_corrector.value or '<none>'}`\n"
+                        f"- root rotation: `{gui_retarget_root_rotation_mode.value}`\n"
+                        f"- publish ZMQ: `{gui_retarget_publish_zmq.value or '<none>'}`\n"
                         f"- teacher: `{run.get('teacher_dir')}`"
                     )
 
@@ -961,6 +1010,21 @@ def create_gui(
                     if get_active_session(event.client) is None:
                         return
                     _set_retarget_info_text()
+
+                for _handle in (
+                    gui_retarget_corrector,
+                    gui_retarget_root_rotation_mode,
+                    gui_retarget_dst_start_height,
+                    gui_retarget_root_skate_comp,
+                    gui_retarget_publish_zmq,
+                    gui_retarget_publish_offsets,
+                    gui_retarget_publish_quat,
+                ):
+                    @_handle.on_update
+                    def _(event: viser.GuiEvent) -> None:
+                        if get_active_session(event.client) is None:
+                            return
+                        _set_retarget_info_text()
 
                 @gui_retarget_refresh.on_click
                 def _(event: viser.GuiEvent) -> None:
@@ -3578,7 +3642,18 @@ def create_gui(
                         "pair_id": selected_pair_id or selected.get("pair_id"),
                         "teacher_epoch": teacher_epoch_value,
                         "reverse": bool(reverse_selected),
-                        "go2_xml_path": _resolve_xml_for_cfg(),
+                        "robot_xml_path": _resolve_xml_for_cfg(),
+                        "corrector_ckpt": str(gui_retarget_corrector.value or "").strip(),
+                        "root_rotation_mode": str(gui_retarget_root_rotation_mode.value or "yaw"),
+                        "dst_start_height": (
+                            float(gui_retarget_dst_start_height.value)
+                            if float(gui_retarget_dst_start_height.value) > 0.0
+                            else None
+                        ),
+                        "apply_root_skate_comp": bool(gui_retarget_root_skate_comp.value),
+                        "publish_zmq": str(gui_retarget_publish_zmq.value or "").strip(),
+                        "publish_ref_offsets": _parse_publish_offsets(gui_retarget_publish_offsets.value),
+                        "publish_quat_convention": str(gui_retarget_publish_quat.value or "wxyz"),
                         "output_dir": "./retarget_output",
                     }
 

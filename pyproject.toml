@@ -30,6 +30,7 @@ dependencies = [
   "pillow>=9.0",
   "av>=16.1.0",
   "bvhio",
+  "pyzmq>=25",
 ]
 
 [project.optional-dependencies]

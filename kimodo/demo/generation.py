@@ -226,7 +226,14 @@ def generate(
                         pair_id=rt_cfg.get("pair_id"),
                         teacher_epoch=teacher_epoch,
                         reverse=bool(rt_cfg.get("reverse", False)),
-                        go2_xml_path=rt_cfg.get("go2_xml_path"),
+                        robot_xml_path=rt_cfg.get("robot_xml_path") or rt_cfg.get("go2_xml_path"),
+                        corrector_ckpt=rt_cfg.get("corrector_ckpt"),
+                        root_rotation_mode=rt_cfg.get("root_rotation_mode", "yaw"),
+                        dst_start_height=rt_cfg.get("dst_start_height"),
+                        apply_root_skate_comp=bool(rt_cfg.get("apply_root_skate_comp", False)),
+                        publish_zmq=rt_cfg.get("publish_zmq"),
+                        publish_quat_convention=rt_cfg.get("publish_quat_convention", "wxyz"),
+                        publish_ref_offsets=tuple(rt_cfg.get("publish_ref_offsets", (0, 1))),
                     )
                 adapter = session.retargeting_adapter
                 

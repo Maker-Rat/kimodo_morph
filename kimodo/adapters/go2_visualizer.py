@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""GO2 MuJoCo Visualizer - integrates with retargeting adapter"""
+"""Generic MuJoCo motion visualizer for Morph retargeting outputs."""
 
 import pickle
 import numpy as np
@@ -11,18 +11,18 @@ import threading
 from pathlib import Path
 
 
-class GO2Visualizer:
-    """Real-time GO2 motion visualizer using MuJoCo"""
+class RobotMotionVisualizer:
+    """Real-time robot motion visualizer using MuJoCo."""
     
-    def __init__(self, go2_xml_path: str = "./morph/assets/robots/unitree_go2/go2.xml", fps: int = 30):
+    def __init__(self, robot_xml_path: str = "./morph/assets/robots/unitree_go2/go2.xml", fps: int = 30):
         """
         Initialize the visualizer.
         
         Args:
-            go2_xml_path: Path to GO2 XML model file
+            robot_xml_path: Path to robot XML model file
             fps: Playback frames per second
         """
-        self.go2_xml_path = go2_xml_path
+        self.robot_xml_path = robot_xml_path
         self.fps = fps
         self.dt = 1.0 / fps
         
@@ -45,10 +45,10 @@ class GO2Visualizer:
         
     def load_model(self):
         """Load MuJoCo model"""
-        if not Path(self.go2_xml_path).exists():
-            raise FileNotFoundError(f"GO2 XML not found: {self.go2_xml_path}")
+        if not Path(self.robot_xml_path).exists():
+            raise FileNotFoundError(f"Robot XML not found: {self.robot_xml_path}")
         
-        self.model = mujoco.MjModel.from_xml_path(self.go2_xml_path)
+        self.model = mujoco.MjModel.from_xml_path(self.robot_xml_path)
         self.data = mujoco.MjData(self.model)
         
         # Disable gravity for kinematic playback
@@ -76,7 +76,7 @@ class GO2Visualizer:
                 joint_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, joint_id)
                 self.motion_joints.append((joint_id, qpos_addr, joint_name))
         print(
-            f"[Visualizer] XML={self.go2_xml_path} "
+            f"[Visualizer] XML={self.robot_xml_path} "
             f"motion_joints={len(self.motion_joints)} actuators={len(self.actuated_joints)}"
         )
         if self.motion_joints:
@@ -210,3 +210,7 @@ class GO2Visualizer:
     def reset(self):
         """Reset to frame 0"""
         self.frame = 0
+
+
+# Backward-compatible alias for older Kimodo code/configs.
+GO2Visualizer = RobotMotionVisualizer
