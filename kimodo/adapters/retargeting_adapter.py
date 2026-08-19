@@ -16,12 +16,72 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
+import yaml
 from scipy.spatial.transform import Rotation
 
 from kimodo.adapters.go2_visualizer import RobotMotionVisualizer
 from kimodo.exports.mujoco import MujocoQposConverter
 from kimodo.skeleton import G1Skeleton34, global_rots_to_local_rots
 from kimodo.tools import to_numpy
+
+
+MORPH_JOINT_NAMES_BY_ROBOT = {
+    "go2": (
+        "FL_hip_joint",
+        "FL_thigh_joint",
+        "FL_calf_joint",
+        "FR_hip_joint",
+        "FR_thigh_joint",
+        "FR_calf_joint",
+        "RL_hip_joint",
+        "RL_thigh_joint",
+        "RL_calf_joint",
+        "RR_hip_joint",
+        "RR_thigh_joint",
+        "RR_calf_joint",
+    ),
+    "b2_z1": (
+        "FL_hip_joint",
+        "FL_thigh_joint",
+        "FL_calf_joint",
+        "FR_hip_joint",
+        "FR_thigh_joint",
+        "FR_calf_joint",
+        "RL_hip_joint",
+        "RL_thigh_joint",
+        "RL_calf_joint",
+        "RR_hip_joint",
+        "RR_thigh_joint",
+        "RR_calf_joint",
+        "joint1",
+        "joint2",
+        "joint3",
+        "joint4",
+        "joint5",
+        "joint6",
+        "jointGripper",
+    ),
+    "yuna": (
+        "1FL_base",
+        "1FL_shoulder",
+        "1FL_elbow",
+        "2FR_base",
+        "2FR_shoulder",
+        "2FR_elbow",
+        "3ML_base",
+        "3ML_shoulder",
+        "3ML_elbow",
+        "4MR_base",
+        "4MR_shoulder",
+        "4MR_elbow",
+        "5BL_base",
+        "5BL_shoulder",
+        "5BL_elbow",
+        "6BR_base",
+        "6BR_shoulder",
+        "6BR_elbow",
+    ),
+}
 
 
 def _quat_xyzw_to_wxyz(quat_xyzw: np.ndarray) -> np.ndarray:
@@ -91,6 +151,8 @@ class MorphReferencePublisher:
         *,
         quat_convention: str = "wxyz",
         offsets: tuple[int, ...] = (0, 1),
+        joint_names: Optional[tuple[str, ...]] = None,
+        motion_mode: Optional[int] = None,
         warmup_sec: float = 0.25,
     ) -> None:
         import zmq
@@ -105,6 +167,8 @@ class MorphReferencePublisher:
         self.offsets = tuple(int(x) for x in offsets)
         if len(self.offsets) == 0 or min(self.offsets) < 0:
             raise ValueError(f"Invalid publish offsets: {self.offsets}")
+        self.joint_names = None if joint_names is None else tuple(str(name) for name in joint_names)
+        self.motion_mode = None if motion_mode is None else int(motion_mode)
         self.context = zmq.Context.instance()
         self.socket = self.context.socket(zmq.PUB)
         self.socket.bind(self.endpoint)
@@ -164,6 +228,10 @@ class MorphReferencePublisher:
                 "refs": refs.tolist(),
                 "valid": True,
             }
+            if self.joint_names is not None and len(self.joint_names) == num_joints:
+                packet["joint_names"] = list(self.joint_names)
+            if self.motion_mode is not None:
+                packet["motion_mode"] = int(self.motion_mode)
             self.socket.send_pyobj(packet)
             self.seq += 1
             if realtime:
@@ -193,8 +261,10 @@ class KimodoRetargetingAdapter:
         dst_start_height: Optional[float] = None,
         apply_root_skate_comp: bool = False,
         publish_zmq: Optional[str] = None,
+        publish_robot: Optional[str] = None,
         publish_quat_convention: str = "wxyz",
         publish_ref_offsets: tuple[int, ...] = (0, 1),
+        publish_motion_mode: Optional[int] = None,
         publish_realtime: bool = True,
     ):
         self.device = str(device)
@@ -215,8 +285,10 @@ class KimodoRetargetingAdapter:
         self.dst_start_height = dst_start_height
         self.apply_root_skate_comp = bool(apply_root_skate_comp)
         self.publish_zmq = str(publish_zmq) if publish_zmq else ""
+        self.publish_robot = str(publish_robot).strip() if publish_robot else ""
         self.publish_quat_convention = str(publish_quat_convention or "wxyz")
         self.publish_ref_offsets = tuple(int(x) for x in publish_ref_offsets)
+        self.publish_motion_mode = None if publish_motion_mode is None else int(publish_motion_mode)
         self.publish_realtime = bool(publish_realtime)
 
         if not self.processed_dir:
@@ -241,7 +313,8 @@ class KimodoRetargetingAdapter:
             f"xml={self.robot_xml_path} "
             f"corrector={self.corrector_ckpt or '<none>'} "
             f"root_rotation_mode={self.root_rotation_mode} "
-            f"publish_zmq={self.publish_zmq or '<none>'}"
+            f"publish_zmq={self.publish_zmq or '<none>'} "
+            f"publish_robot={self.publish_robot or '<auto>'}"
         )
 
         if not os.path.exists(self.teacher_dir):
@@ -343,6 +416,70 @@ class KimodoRetargetingAdapter:
                             return resolved
 
         return ""
+
+    def _known_robot_ids(self) -> set[str]:
+        robot_dir = Path(self.output_root) / "configs" / "robots"
+        robot_ids = set(MORPH_JOINT_NAMES_BY_ROBOT)
+        for path in robot_dir.glob("*.yaml"):
+            robot_ids.add(path.stem)
+            try:
+                data = yaml.safe_load(path.read_text()) or {}
+            except Exception:
+                data = {}
+            robot_id = data.get("robot_id")
+            if robot_id:
+                robot_ids.add(str(robot_id))
+        return robot_ids
+
+    def _pair_robot_ids(self) -> tuple[str, str]:
+        if self.task_family and self.pair_id:
+            pair_path = (
+                Path(self.output_root)
+                / "configs"
+                / "tasks"
+                / self.task_family
+                / "pairs"
+                / f"{self.pair_id}.yaml"
+            )
+            if pair_path.exists():
+                try:
+                    data = yaml.safe_load(pair_path.read_text()) or {}
+                    src_robot = str(data.get("src_robot") or "")
+                    dst_robot = str(data.get("dst_robot") or "")
+                    if src_robot or dst_robot:
+                        return src_robot, dst_robot
+                except Exception:
+                    pass
+
+        if "_to_" in self.pair_id:
+            src_robot, dst_robot = self.pair_id.split("_to_", 1)
+            return self._normalize_robot_id(src_robot), self._normalize_robot_id(dst_robot)
+        return "", ""
+
+    def _normalize_robot_id(self, value: str) -> str:
+        value = str(value or "").strip()
+        if not value:
+            return ""
+        known = self._known_robot_ids()
+        if value in known:
+            return value
+        for robot_id in sorted(known, key=len, reverse=True):
+            if value == robot_id or value.startswith(f"{robot_id}_") or value.endswith(f"_{robot_id}"):
+                return robot_id
+        return value
+
+    def _resolve_publish_robot(self) -> str:
+        if self.publish_robot:
+            return self._normalize_robot_id(self.publish_robot)
+        src_robot, dst_robot = self._pair_robot_ids()
+        robot = src_robot if self.reverse else dst_robot
+        return self._normalize_robot_id(robot)
+
+    def _publish_joint_names_for_robot(self, robot: str, num_joints: int) -> Optional[tuple[str, ...]]:
+        names = MORPH_JOINT_NAMES_BY_ROBOT.get(self._normalize_robot_id(robot))
+        if names is not None and len(names) == int(num_joints):
+            return names
+        return None
 
     def kimodo_to_morph_pkl(
         self,
@@ -455,21 +592,25 @@ class KimodoRetargetingAdapter:
             self.visualizer.update_motion(output_path)
 
         if self.publish_zmq:
-            pair_dst = self.pair_id.split("_to_", 1)[1] if "_to_" in self.pair_id else ""
-            robot = pair_dst if not self.reverse else self.pair_id.split("_to_", 1)[0]
+            robot = self._resolve_publish_robot()
+            dof = np.asarray(out.get("dof_pos"), dtype=np.float32)
+            joint_names = self._publish_joint_names_for_robot(robot, dof.shape[1] if dof.ndim == 2 else 0)
             publisher = MorphReferencePublisher(
                 endpoint=self.publish_zmq,
                 robot=robot,
                 fps=float(out.get("fps", fps)),
                 quat_convention=self.publish_quat_convention,
                 offsets=self.publish_ref_offsets,
+                joint_names=joint_names,
+                motion_mode=self.publish_motion_mode,
             )
             try:
                 sent = publisher.stream_pkl(output_path, realtime=self.publish_realtime)
                 print(
                     "[Retargeting][ZMQ] "
                     f"published {sent} packets to {self.publish_zmq} "
-                    f"(robot={robot}, offsets={list(self.publish_ref_offsets)})"
+                    f"(robot={robot}, offsets={list(self.publish_ref_offsets)}, "
+                    f"joint_names={'yes' if joint_names is not None else 'no'})"
                 )
             finally:
                 publisher.close()

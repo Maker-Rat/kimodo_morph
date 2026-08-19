@@ -801,6 +801,11 @@ def create_gui(
                     initial_value="",
                     hint="Optional endpoint, e.g. tcp://127.0.0.1:5555. Publishes retargeted references after generation.",
                 )
+                gui_retarget_publish_robot = client.gui.add_text(
+                    "Publish Robot",
+                    initial_value="",
+                    hint="Optional packet robot id override, e.g. yuna, go2, b2_z1. Empty infers from the selected pair config.",
+                )
                 gui_retarget_publish_offsets = client.gui.add_text(
                     "Publish Offsets",
                     initial_value="0,1",
@@ -811,6 +816,11 @@ def create_gui(
                     options=["wxyz", "xyzw"],
                     initial_value="wxyz",
                     hint="Quaternion convention expected by the sim2sim receiver.",
+                )
+                gui_retarget_publish_motion_mode = client.gui.add_text(
+                    "Publish Motion Mode",
+                    initial_value="",
+                    hint="Optional integer motion_mode field, e.g. 0 for loco, 1 for loco-manip. Empty omits the field.",
                 )
                 gui_retarget_info = client.gui.add_markdown("")
                 gui_retarget_refresh = client.gui.add_button("Refresh Morph Config/Run List")
@@ -823,6 +833,10 @@ def create_gui(
                             continue
                         out.append(int(item))
                     return out or [0, 1]
+
+                def _parse_optional_int(raw: str) -> int | None:
+                    text = str(raw or "").strip()
+                    return None if not text else int(text)
 
                 def _normalize_processed_path(path_str: str) -> str:
                     raw = str(path_str or "").strip()
@@ -922,6 +936,8 @@ def create_gui(
                         f"- corrector: `{gui_retarget_corrector.value or '<none>'}`\n"
                         f"- root rotation: `{gui_retarget_root_rotation_mode.value}`\n"
                         f"- publish ZMQ: `{gui_retarget_publish_zmq.value or '<none>'}`\n"
+                        f"- publish robot: `{gui_retarget_publish_robot.value or '<auto>'}`\n"
+                        f"- publish motion mode: `{gui_retarget_publish_motion_mode.value or '<omitted>'}`\n"
                         f"- teacher: `{run.get('teacher_dir')}`"
                     )
 
@@ -3654,8 +3670,10 @@ def create_gui(
                         ),
                         "apply_root_skate_comp": bool(gui_retarget_root_skate_comp.value),
                         "publish_zmq": str(gui_retarget_publish_zmq.value or "").strip(),
+                        "publish_robot": str(gui_retarget_publish_robot.value or "").strip(),
                         "publish_ref_offsets": _parse_publish_offsets(gui_retarget_publish_offsets.value),
                         "publish_quat_convention": str(gui_retarget_publish_quat.value or "wxyz"),
+                        "publish_motion_mode": _parse_optional_int(gui_retarget_publish_motion_mode.value),
                         "output_dir": "./retarget_output",
                     }
 

@@ -232,8 +232,10 @@ def generate(
                         dst_start_height=rt_cfg.get("dst_start_height"),
                         apply_root_skate_comp=bool(rt_cfg.get("apply_root_skate_comp", False)),
                         publish_zmq=rt_cfg.get("publish_zmq"),
+                        publish_robot=rt_cfg.get("publish_robot"),
                         publish_quat_convention=rt_cfg.get("publish_quat_convention", "wxyz"),
                         publish_ref_offsets=tuple(rt_cfg.get("publish_ref_offsets", (0, 1))),
+                        publish_motion_mode=rt_cfg.get("publish_motion_mode"),
                     )
                 adapter = session.retargeting_adapter
                 
