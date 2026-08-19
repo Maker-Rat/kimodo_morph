@@ -1,7 +1,7 @@
 [submodule "morph"]
 	path = morph
 	url = https://github.com/Maker-Rat/morph
-	branch = rpy
+	branch = main
 [submodule "kimodo-viser"]
 	path = kimodo-viser
 	url = https://github.com/nv-tlabs/kimodo-viser.git
