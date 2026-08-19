@@ -5,6 +5,42 @@
   <a href="https://research.nvidia.com/labs/sil/projects/kimodo/docs/index.html"><img src="https://img.shields.io/badge/docs-online-green.svg" alt="Documentation"></a>
 </p>
 
+> [!NOTE]
+> This is the [`kimodo_morph`](https://github.com/Maker-Rat/kimodo_morph) integration fork used by X-Morph. It preserves the upstream Kimodo implementation and adds text-conditioned G1-to-non-humanoid retargeting, target-robot visualization, and optional ZMQ reference publishing. See the upstream [Kimodo repository](https://github.com/nv-tlabs/kimodo) for the original project.
+
+## X-Morph Text-to-Robot Integration
+
+Kimodo generates a G1 motion from text; X-Morph then retargets it to a configured robot such as Go2, Yuna, or B2–Z1:
+
+```text
+text prompt -> Kimodo G1 motion -> X-Morph teacher/corrector -> target-robot reference
+```
+
+Use Python 3.10 or newer and clone the integration with its pinned dependencies:
+
+```bash
+git clone --recurse-submodules https://github.com/Maker-Rat/kimodo_morph.git
+cd kimodo_morph
+pip install -e ".[demo]"
+pip install -e ./morph
+```
+
+Trained X-Morph checkpoints are not stored in this repository. Place a compatible teacher run under `morph/runs/` (or select an external path), then launch `kimodo_demo`. The **Retargeting (Morph)** panel discovers pair configurations, processed datasets, and teacher runs from the bundled `morph` checkout.
+
+A minimal command-line check is:
+
+```bash
+python test_retargeting.py \
+  --prompt "A person walks forward" \
+  --retarget_model_dir ./morph/runs/teacher_loco_g1_go2 \
+  --processed_dir ./morph/data/processed/loco_g1_go2 \
+  --task_family locomotion \
+  --pair_id g1_to_go2 \
+  --output ./test_retarget_output
+```
+
+The other X-Morph interface repository is [`video2morph`](https://github.com/Maker-Rat/video2morph), which provides real-time monocular video-to-reference publishing.
+
 ## Overview
 
 Kimodo is a **ki**nematic **mo**tion **d**iffusi**o**n model trained on a large-scale (700 hours) commercially-friendly optical motion capture dataset. The model generates high-quality 3D human and robot motions, and is controlled through text prompts and an extensive set of constraints such as full-body pose keyframes, end-effector positions/rotations, 2D paths, and 2D waypoints. Full details of the model architecture and training are available in the [technical report](https://research.nvidia.com/labs/sil/projects/kimodo/assets/kimodo_tech_report.pdf).
